@@ -258,7 +258,8 @@ class MeasurementData(object):
         if self.data:
             keys = list(self.data.keys())
             if not sort_by_time:
-                return keys
+                keys_int = [int(key) for key in keys]
+                return [i for _, i in sorted(zip(keys_int, keys))]
 
             dates = []
             for key in keys:
