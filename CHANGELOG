@@ -1,3 +1,26 @@
+## 0.12.2 - 2026-05-21
+### Fixed
+- fix(export): do not fail on empty images #198
+- fix(fits): constrain fit more to physical limits #196
+
+## 0.12.1 - 2026-03-30
+### Fixed
+- fix: handle aborted scans better #195
+
+### Changed
+- Updated actions dependencies
+
+## 0.12.0 - 2026-03-03
+
+### Added
+- feat: store frequency axis for every spectrum in evaluated data file #192
+
+### Fixed
+- fix: only allow positive FWHM and intensity #193
+
+### Changed
+- Updated actions dependencies
+
 ## 0.11.0 - 2025-09-11
 
 ### Fixed
