@@ -223,6 +223,10 @@ class FluorescenceExport(object):
                         )
                     )
 
+                    # Don't fail on empty images
+                    if image_warped_bm.size == (0, 0):
+                        continue
+
                     filename = path / f"{self.file.path.stem}" \
                                       f"_FLrep{fluorescence_repetition}" \
                                       f"_channel{channel}" \
