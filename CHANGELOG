@@ -1,3 +1,18 @@
+## Unreleased
+
+### Added
+- feat(evaluation): allow calculating the Brillouin shift from the
+  Stokes/Anti-Stokes peak distance and the free spectral range,
+  which is robust against saturated Rayleigh peaks
+
+### Fixed
+- fix(fits): make multi-peak fits more robust by seeding every peak
+  from its own bounds window, retrying degenerate fits with
+  alternative starting values and not failing when peak finding
+  finds fewer peaks than requested
+- fix(calibration): do not abort the whole calibration when a single
+  multi-peak calibration fit fails (its NaN is now skipped)
+
 ## 0.12.2 - 2026-05-21
 ### Fixed
 - fix(export): do not fail on empty images #198

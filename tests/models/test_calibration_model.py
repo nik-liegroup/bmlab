@@ -400,3 +400,45 @@ def test_fitset():
     fit_set.clear('10')
 
     assert fit_set.get_fit('10', 3, 4) is None
+
+
+def test_get_sorted_peaks_skips_failed_fits():
+    cm = CalibrationModel()
+
+    # A single Rayleigh peak per region
+    cm.add_rayleigh_fit('0', 0, 0, 5.0, 1, 300, 100)
+    cm.add_rayleigh_fit('0', 1, 0, 50.0, 1, 300, 100)
+    # A successful multi-peak Brillouin fit (w0s is a tuple)
+    cm.add_brillouin_fit('0', 0, 0, (15.0, 20.0), (1, 1), (200, 200), 100)
+    # A failed multi-peak Brillouin fit stores a single NaN
+    cm.add_brillouin_fit('0', 1, 0, np.nan, np.nan, np.nan, np.nan)
+
+    peaks = cm.get_sorted_peaks('0', 0)
+
+    # The failed fit must not crash and its NaN must be dropped
+    np.testing.assert_array_equal(peaks, [5.0, 15.0, 20.0, 50.0])
+
+
+def test_get_fsr():
+    cm = CalibrationModel()
+
+    # No calibration available
+    assert cm.get_fsr() is None
+
+    # One calibration with two frames
+    cm.set_vipa_params('0', [
+        (1, 2, 3, 15.0e9),
+        (1, 2, 3, 15.2e9),
+    ])
+    np.testing.assert_allclose(cm.get_fsr(), 15.1e9)
+
+    # Two calibrations
+    cm.set_vipa_params('1', [
+        (1, 2, 3, 15.4e9),
+        (1, 2, 3, 15.6e9),
+    ])
+    np.testing.assert_allclose(cm.get_fsr(), 15.3e9)
+
+    cm.clear_vipa_params('0')
+    cm.clear_vipa_params('1')
+    assert cm.get_fsr() is None

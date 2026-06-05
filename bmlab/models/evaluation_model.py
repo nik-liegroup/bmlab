@@ -21,6 +21,12 @@ class EvaluationModel(Serializer):
         self.bounds_w0 = None
         # @since 0.8.0
         self.bounds_fwhm = None
+        # @since 0.13.0
+        # How to calculate the Brillouin shift:
+        # 'rayleigh': measure against the nearest Rayleigh peak
+        # 'fsr':      use the distance of the Stokes and
+        #             Anti-Stokes peaks and the free spectral range
+        self.brillouin_shift_method = 'rayleigh'
 
         self.results = {}
         for key in self.parameters.keys():
@@ -94,6 +100,11 @@ class EvaluationModel(Serializer):
         # @since 0.12.0
         if not hasattr(self, 'frequencies'):
             self.frequencies = {}
+
+        # Migrations from 0.12.x to 0.13.0
+        # @since 0.13.0
+        if not hasattr(self, 'brillouin_shift_method'):
+            self.brillouin_shift_method = 'rayleigh'
 
     def invalidate_results(self):
         for key in self.parameters:
@@ -280,6 +291,14 @@ class EvaluationModel(Serializer):
 
     def get_parameter_keys(self):
         return self.parameters
+
+    def set_brillouin_shift_method(self, method):
+        if method not in ('rayleigh', 'fsr'):
+            method = 'rayleigh'
+        self.brillouin_shift_method = method
+
+    def get_brillouin_shift_method(self):
+        return self.brillouin_shift_method
 
     def setNrBrillouinPeaks(self, nr_brillouin_peaks):
         self.nr_brillouin_peaks = nr_brillouin_peaks

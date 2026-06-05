@@ -438,6 +438,15 @@ class EvaluationController(ImageController):
             return
         evm.setNrBrillouinPeaks(nr_brillouin_peaks)
 
+    def set_brillouin_shift_method(self, method):
+        evm = self.session.evaluation_model()
+        if not evm:
+            return
+        evm.set_brillouin_shift_method(method)
+        # The shift can be recalculated from
+        # the existing fits, no re-evaluation needed
+        calculate_derived_values()
+
     def set_bounds(self, bounds):
         evm = self.session.evaluation_model()
         if not evm:
@@ -976,6 +985,17 @@ def calculate_derived_values():
     if evm.results['rayleigh_peak_position_f'].size == 0:
         return
 
+    if evm.get_brillouin_shift_method() == 'fsr':
+        calculate_brillouin_shift_fsr(evm)
+    else:
+        calculate_brillouin_shift_rayleigh(evm)
+
+
+def calculate_brillouin_shift_rayleigh(evm):
+    """
+    We calculate the Brillouin shift as the difference of the
+    Brillouin peak position to the nearest Rayleigh peak position.
+    """
     shape_brillouin = evm.results['brillouin_peak_position_f'].shape
     shape_rayleigh = evm.results['rayleigh_peak_position_f'].shape
 
@@ -1002,6 +1022,64 @@ def calculate_derived_values():
         evm.results['brillouin_shift_f'] = np.nanmin(brillouin_shift_f, 6)
 
 
+def calculate_brillouin_shift_fsr(evm):
+    """
+    We calculate the Brillouin shift from the distance of the
+    Stokes and Anti-Stokes Brillouin peaks between two Rayleigh
+    peaks and the free spectral range of the VIPA:
+
+        shift = (FSR - (pos_S - pos_AS)) / 2
+
+    This does not depend on the Rayleigh peak positions and is
+    hence more robust in case the Rayleigh peaks are saturated.
+
+    It requires that both the Stokes and Anti-Stokes Brillouin
+    regions were evaluated. Otherwise (or if no calibration is
+    available) we fall back to the Rayleigh peak based calculation.
+    """
+    session = Session.get_instance()
+    cm = session.calibration_model()
+
+    fsr = cm.get_fsr() if cm else None
+
+    positions = evm.results['brillouin_peak_position_f']
+    shape_brillouin = positions.shape
+
+    # We need both the Stokes and Anti-Stokes Brillouin region
+    if fsr is None or shape_brillouin[4] < 2:
+        calculate_brillouin_shift_rayleigh(evm)
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            action='ignore',
+            message='Mean of empty slice'
+        )
+        # We sort the regions by their mean peak position,
+        # so we don't rely on the order of the region list.
+        region_positions = np.nanmean(
+            positions, axis=(0, 1, 2, 3, 5))
+    regions_sorted = np.argsort(region_positions)
+    # In case of more than two regions, we use the outermost ones
+    region_low = regions_sorted[0]
+    region_high = regions_sorted[-1]
+
+    # Peak k of one region belongs to peak k of the other region,
+    # because the multi-peak fit bounds are mirrored for
+    # the Anti-Stokes region
+    brillouin_shift_f = np.nan * np.ones(shape_brillouin)
+    shift = abs(
+        fsr - (
+            positions[:, :, :, :, region_high, :] -
+            positions[:, :, :, :, region_low, :]
+        )
+    ) / 2
+    brillouin_shift_f[:, :, :, :, region_low, :] = shift
+    brillouin_shift_f[:, :, :, :, region_high, :] = shift
+
+    evm.results['brillouin_shift_f'] = brillouin_shift_f
+
+
 class Controller(object):
 
     def __init__(self):
@@ -1012,7 +1090,8 @@ class Controller(object):
                  brillouin_regions, rayleigh_regions,
                  repetitions=None, nr_brillouin_peaks=1,
                  multi_peak_bounds=None,
-                 multi_peak_bounds_fwhm=None):
+                 multi_peak_bounds_fwhm=None,
+                 brillouin_shift_method='rayleigh'):
         # Load data file
         self.session.set_file(filepath)
 
@@ -1052,6 +1131,7 @@ class Controller(object):
             evc.set_nr_brillouin_peaks(nr_brillouin_peaks)
             evc.set_bounds(multi_peak_bounds)
             evc.set_bounds_fwhm(multi_peak_bounds_fwhm)
+            evc.set_brillouin_shift_method(brillouin_shift_method)
 
             evc.evaluate()
 

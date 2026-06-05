@@ -54,247 +54,365 @@ def fit_lorentz(x, y):
     return w0, fwhm, intensity, offset
 
 
-def fit_double_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
-    offset_guess = (y[0] + y[-1]) / 2.
-    # gam_guess = (w0_guess ** 2 * (np.max(y) - offset_guess)) ** -0.5
-    fwhm_guess = 10 * (x[-1] - x[0]) / x.shape[0] * np.ones(2)
-    intensity_guess = np.max(y) - offset_guess
+def _smooth_spectrum(y, window=5):
+    """
+    Lightly smooths the given data with a moving average.
+    Only used to get more robust initial guesses for the fits,
+    never for the fit itself.
+    """
+    window = min(window, len(y))
+    if window <= 1:
+        return np.asarray(y, dtype=float)
+    kernel = np.ones(window) / window
+    y_padded = np.pad(
+        y, (window // 2, window - 1 - window // 2), mode='edge')
+    return np.convolve(y_padded, kernel, mode='valid')
 
-    # We run peak finding to get a good guess of the peak positions
-    # and use the two peaks with the highest prominence.
+
+def _get_peak_windows(x, nr_peaks, bounds_w0):
+    """
+    Returns the window in which to search for the initial
+    position guess of every peak.
+    """
+    if bounds_w0 is None:
+        return nr_peaks * [np.array((x[0], x[-1]))]
+    return [np.clip(np.array(bound, dtype=float), x[0], x[-1])
+            for bound in bounds_w0]
+
+
+def _guess_without_bounds(x, y, nr_peaks):
+    """
+    Calculates the initial guesses for a multi-peak Lorentz fit
+    without w0 bounds. This reproduces the original behavior
+    (the most prominent peaks, sorted by position, with a shared
+    intensity guess), but instead of giving up when fewer peaks
+    than requested are found, it falls back to evenly spaced
+    guesses so we still attempt a fit.
+    """
+    offset_guess = (y[0] + y[-1]) / 2.
+    intensity_guess = nr_peaks * [np.max(y) - offset_guess]
+
     peaks, properties = find_peaks(y, prominence=1)
     idx = np.argsort(properties['prominences'])[::-1]
+    if len(idx) >= nr_peaks:
+        idx_sort = np.sort(peaks[idx[0:nr_peaks]])
+        w0_guess = list(x[idx_sort])
+    else:
+        # Use the peaks we found and fill up with evenly
+        # spaced positions, avoiding the ones already found
+        found = sorted(x[peaks[idx]])
+        evenly = list(np.linspace(x[0], x[-1], nr_peaks + 2)[1:-1])
+        w0_guess = (found + evenly)[:nr_peaks]
+        w0_guess.sort()
 
-    # Return if we didn't find two peaks
-    if len(idx) < 2:
-        return
+    return w0_guess, intensity_guess, offset_guess
 
-    idx_sort = np.sort(peaks[idx[0:2]])
-    w0_guess = list(x[idx_sort])
+
+def _guess_with_bounds(x, y, nr_peaks, bounds_w0, bounds_fwhm):
+    """
+    Calculates the initial guesses for a multi-peak Lorentz fit
+    with w0 bounds. Every peak is seeded from within its own
+    bounds window, so that a strong peak in a different window
+    cannot shadow a weak one.
+    """
+    offset_guess = (y[0] + y[-1]) / 2.
+    y_s = _smooth_spectrum(y)
+    data_range = np.nanmax(y) - np.nanmin(y)
+    min_distance = 10 * (x[-1] - x[0]) / x.shape[0]
+
+    # We run peak finding on the smoothed data to get candidates
+    # for the peak positions, sorted by descending prominence.
+    # The prominence is relative to the data range, so it works
+    # independently of the intensity scale.
+    peaks, properties = find_peaks(
+        y_s, prominence=max(1., 0.05 * data_range))
+    candidates = list(peaks[np.argsort(properties['prominences'])[::-1]])
+
+    windows = _get_peak_windows(x, nr_peaks, bounds_w0)
+
+    w0_guess = nr_peaks * [None]
+
+    def fallback_position(window, used):
+        # The maximum of the smoothed data within the window,
+        # avoiding positions already used
+        in_window = (x >= window[0]) & (x <= window[1])
+        for w0 in used:
+            in_window &= np.abs(x - w0) > min_distance
+        if not in_window.any():
+            in_window = (x >= window[0]) & (x <= window[1])
+        if in_window.any():
+            return float(x[np.flatnonzero(in_window)[
+                np.argmax(y_s[in_window])]])
+        return float(np.mean(window))
+
+    # Peaks with a finite bounds window are seeded from within
+    # their own window first, so that a strong peak in a different
+    # window cannot shadow a weak one.
+    is_windowed = [
+        bool(np.all(np.isfinite(np.array(bound, dtype=float))))
+        for bound in bounds_w0]
+
+    for i in range(nr_peaks):
+        if not is_windowed[i]:
+            continue
+        window = windows[i]
+        # Use the most prominent candidate within the window
+        candidate = next((c for c in candidates
+                          if window[0] <= x[c] <= window[1]), None)
+        if candidate is not None:
+            w0_guess[i] = float(x[candidate])
+        else:
+            used = [w0 for w0 in w0_guess if w0 is not None]
+            w0_guess[i] = fallback_position(window, used)
+        # Remove candidates close to the used position
+        candidates = [c for c in candidates
+                      if abs(x[c] - w0_guess[i]) > min_distance]
+
+    # The remaining peaks get the most prominent remaining
+    # candidates, sorted by position and matched to the windows
+    # sorted by their center (this e.g. keeps the peaks of an
+    # anti-Stokes region in the expected order).
+    remaining = [i for i in range(nr_peaks) if w0_guess[i] is None]
+    positions = []
+    for i in remaining:
+        if candidates:
+            positions.append(float(x[candidates.pop(0)]))
+        else:
+            used = [w0 for w0 in w0_guess if w0 is not None] + positions
+            positions.append(fallback_position(windows[i], used))
+    positions.sort()
+    remaining.sort(key=lambda i: float(np.mean(windows[i])))
+    for i, position in zip(remaining, positions):
+        w0_guess[i] = position
+
+    # Check that the initial guesses are within the bounds
+    # and estimate the intensity at the guessed positions
+    intensity_guess = []
+    for i in range(nr_peaks):
+        w0_guess[i] = float(np.clip(w0_guess[i], *windows[i]))
+        idx = np.argmin(np.abs(x - w0_guess[i]))
+        intensity_guess.append(float(max(
+            y_s[idx] - offset_guess, 0.05 * data_range)))
+
+    return w0_guess, intensity_guess, offset_guess
+
+
+def _guess_starting_values(x, y, nr_peaks, bounds_w0, bounds_fwhm):
+    """
+    Calculates the initial guesses for a multi-peak Lorentz fit.
+
+    Returns
+    -------
+    w0_guess, fwhm_guess, intensity_guess (lists with one entry
+    per peak) and offset_guess
+    """
+    if bounds_w0 is None:
+        w0_guess, intensity_guess, offset_guess = \
+            _guess_without_bounds(x, y, nr_peaks)
+    else:
+        w0_guess, intensity_guess, offset_guess = \
+            _guess_with_bounds(x, y, nr_peaks, bounds_w0, bounds_fwhm)
+
+    fwhm_guess = list(10 * (x[-1] - x[0]) / x.shape[0] * np.ones(nr_peaks))
+    if bounds_fwhm is not None:
+        # Check that the initial guesses are within the bounds
+        fwhm_guess = [np.clip(guess, *bounds_fwhm[idx])
+                      for idx, guess in enumerate(fwhm_guess)]
+
+    return w0_guess, fwhm_guess, intensity_guess, offset_guess
+
+
+def _create_lorentz_bounds(x, nr_peaks, bounds_w0, bounds_fwhm):
+    """
+    Creates the bounds array for a multi-peak Lorentz fit
+    with the parameter layout (w0, fwhm, intensity) per peak
+    plus a common offset as the last parameter.
+    """
+    if bounds_w0 is None and bounds_fwhm is None:
+        return -np.inf, np.inf
+
+    nr_params = 3 * nr_peaks + 1
+    # Lower limits
+    bounds_lower = -np.inf * np.ones(nr_params)
+    # Upper limits
+    bounds_upper = np.inf * np.ones(nr_params)
+
+    # full-width-half-maximum
+    # The VIPA spectrometer has an instrument width of
+    # approx. 750 MHz for the FOB setup
+    # and 180 MHz for the 780 nm setup.
+    # This is far higher than the step size,
+    # so we limit it to this.
+    fwhm_lower_bound = (x[-1] - x[0]) / x.shape[0]
+
+    for i in range(nr_peaks):
+        # full-width-half-maximum
+        bounds_lower[3 * i + 1] = fwhm_lower_bound
+        # intensity
+        bounds_lower[3 * i + 2] = 0
+
+    # offset
+    bounds_lower[-1] = 0
+
+    # If we have w0 bounds, set them
+    if bounds_w0 is not None:
+        for i in range(nr_peaks):
+            # peak central position
+            bounds_lower[3 * i] = bounds_w0[i][0]
+            bounds_upper[3 * i] = bounds_w0[i][1]
+
+    if bounds_fwhm is not None:
+        for i in range(nr_peaks):
+            # peak FWHM
+            bounds_lower[3 * i + 1] = bounds_fwhm[i][0]
+            bounds_upper[3 * i + 1] = bounds_fwhm[i][1]
+
+    return bounds_lower, bounds_upper
+
+
+def _clip_to_bounds(x0, bounds):
+    """ Clips the initial guesses into the given bounds. """
+    if np.isscalar(bounds[0]):
+        return x0
+    return np.clip(x0, bounds[0], bounds[1])
+
+
+def _find_degenerate_peaks(x, y, params, bounds, nr_peaks):
+    """
+    Returns the indices of peaks for which the fit is degenerate,
+    i.e. the peak intensity collapsed to (nearly) zero or the peak
+    position is pinned at one of its bounds.
+    """
+    data_range = np.nanmax(y) - np.nanmin(y)
+    step = (x[-1] - x[0]) / x.shape[0]
+    degenerate = []
+    for i in range(nr_peaks):
+        w0 = params[3 * i]
+        intensity = params[3 * i + 2]
+        collapsed = intensity <= 0.02 * data_range
+        pinned = False
+        if not np.isscalar(bounds[0]):
+            lower = bounds[0][3 * i]
+            upper = bounds[1][3 * i]
+            pinned = (np.isfinite(lower) and abs(w0 - lower) < step) or \
+                     (np.isfinite(upper) and abs(w0 - upper) < step)
+        if collapsed or pinned:
+            degenerate.append(i)
+    return degenerate
+
+
+def _create_retry_x0(x, y, params, degenerate, bounds, nr_peaks):
+    """
+    Creates alternative starting values for a retry of a degenerate
+    multi-peak Lorentz fit. Healthy peaks keep their fitted values,
+    degenerate peaks are reseeded at the maximum of the smoothed
+    residual within their bounds window.
+    """
+    x0 = np.array(params, dtype=float)
+    data_range = np.nanmax(y) - np.nanmin(y)
+
+    # The residual of the healthy peaks
+    model = x0[-1] * np.ones_like(y, dtype=float)
+    for i in range(nr_peaks):
+        if i not in degenerate:
+            model = model + lorentz(x, *x0[3 * i:3 * i + 3])
+    residual = _smooth_spectrum(y - model)
+
+    for i in degenerate:
+        if np.isscalar(bounds[0]):
+            window = np.array((x[0], x[-1]))
+        else:
+            window = np.clip(
+                np.array((bounds[0][3 * i], bounds[1][3 * i])),
+                x[0], x[-1])
+        in_window = (x >= window[0]) & (x <= window[1])
+        if in_window.any():
+            idx = np.flatnonzero(in_window)[
+                np.argmax(residual[in_window])]
+            x0[3 * i] = x[idx]
+            x0[3 * i + 2] = max(residual[idx], 0.3 * data_range)
+        else:
+            x0[3 * i] = np.mean(window)
+            x0[3 * i + 2] = 0.3 * data_range
+        x0[3 * i + 1] = max(
+            0.25 * (window[1] - window[0]),
+            10 * (x[-1] - x[0]) / x.shape[0])
+
+    return _clip_to_bounds(x0, bounds)
+
+
+def fit_multi_lorentz(x, y, nr_peaks, bounds_w0=None, bounds_fwhm=None):
+    """
+    Fits the sum of nr_peaks Lorentz curves and a common offset
+    to the given data.
+
+    If the fit is degenerate (a peak collapsed to zero intensity or
+    got pinned at a position bound), it is retried once with
+    alternative starting values and the better result is returned.
+
+    Returns
+    -------
+    Tuples of center, full-width-half-maximum and intensity
+    (one entry per peak), and the offset
+    """
+    w0_guess, fwhm_guess, intensity_guess, offset_guess = \
+        _guess_starting_values(x, y, nr_peaks, bounds_w0, bounds_fwhm)
 
     def error(params, xdata, ydata):
-        return (ydata
-                - lorentz(xdata, *params[0:3])
-                - lorentz(xdata, *params[3:6])
-                - params[6]) ** 2
+        res = ydata - params[-1]
+        for i in range(nr_peaks):
+            res = res - lorentz(xdata, *params[3 * i:3 * i + 3])
+        return res ** 2
 
-    # Create the bounds array
-    if bounds_w0 is None and bounds_fwhm is None:
-        bounds = (-np.inf, np.inf)
-    else:
-        # Initialize the bounds
-        # Lower limits
-        bounds_lower = -np.inf * np.ones(7)
-        # Upper limits
-        bounds_upper = np.inf * np.ones(7)
+    bounds = _create_lorentz_bounds(x, nr_peaks, bounds_w0, bounds_fwhm)
 
-        # full-width-half-maximum
-        # The VIPA spectrometer has an instrument width of
-        # approx. 750 MHz for the FOB setup
-        # and 180 MHz for the 780 nm setup.
-        # This is far higher than the step size,
-        # so we limit it to this.
-        fwhm_lower_bound = (x[-1] - x[0]) / x.shape[0]
-
-        # 1st peak:
-        # full-width-half-maximum
-        bounds_lower[1] = fwhm_lower_bound
-        # intensity
-        bounds_lower[2] = 0
-
-        # 2nd peak:
-        # full-width-half-maximum
-        bounds_lower[4] = fwhm_lower_bound
-        # intensity
-        bounds_lower[5] = 0
-
-        # offset
-        bounds_lower[6] = 0
-
-        # If we have w0 bounds, set them
-        if bounds_w0 is not None:
-            # 1st peak central position
-            bounds_lower[0] = bounds_w0[0][0]
-            bounds_upper[0] = bounds_w0[0][1]
-            # 2nd peak central position
-            bounds_lower[3] = bounds_w0[1][0]
-            bounds_upper[3] = bounds_w0[1][1]
-
-            # Sort the guesses to the bounds
-            bounds_w0_center = [np.mean(
-                np.clip(bound, *x[::len(x) - 1])) for bound in bounds_w0]
-            w0_guess.sort(
-                reverse=bool(bounds_w0_center[0] > bounds_w0_center[1]))
-
-            # Check that the initial guesses are within the bounds
-            w0_guess = [np.clip(
-                guess, *bounds_w0[idx]) for idx, guess in enumerate(w0_guess)]
-
-        if bounds_fwhm is not None:
-            # 1st peak FWHM
-            bounds_lower[1] = bounds_fwhm[0][0]
-            bounds_upper[1] = bounds_fwhm[0][1]
-            # 2nd peak FWHM
-            bounds_lower[4] = bounds_fwhm[1][0]
-            bounds_upper[4] = bounds_fwhm[1][1]
-
-            # Check that the initial guesses are within the bounds
-            fwhm_guess = [np.clip(
-                guess, *bounds_fwhm[idx]) for
-                idx, guess in enumerate(fwhm_guess)]
-
-        bounds = (bounds_lower, bounds_upper)
+    x0 = []
+    for i in range(nr_peaks):
+        x0.extend((w0_guess[i], fwhm_guess[i], intensity_guess[i]))
+    x0.append(offset_guess)
+    x0 = _clip_to_bounds(np.array(x0), bounds)
 
     opt_result = least_squares(
         error,
-        x0=(w0_guess[0], fwhm_guess[0], intensity_guess,
-            w0_guess[1], fwhm_guess[1], intensity_guess,
-            offset_guess
-            ),
+        x0=x0,
         args=(x, y),
         bounds=bounds
     )
+
+    # If the fit is degenerate, we retry once with alternative
+    # starting values and keep the better result
+    degenerate = _find_degenerate_peaks(
+        x, y, opt_result.x, bounds, nr_peaks)
+    if degenerate:
+        x0_retry = _create_retry_x0(
+            x, y, opt_result.x, degenerate, bounds, nr_peaks)
+        opt_retry = least_squares(
+            error,
+            x0=x0_retry,
+            args=(x, y),
+            bounds=bounds
+        )
+        if opt_retry.success and (not opt_result.success
+                                  or opt_retry.cost < opt_result.cost):
+            opt_result = opt_retry
 
     if not opt_result.success:
         raise FitError('Lorentz fit failed.')
 
     res = opt_result.x
-    w0s, fwhms, intens = (res[0], res[3]), (res[1], res[4]), (res[2], res[5])
-    offset = res[6]
+    w0s = tuple(res[3 * i] for i in range(nr_peaks))
+    fwhms = tuple(res[3 * i + 1] for i in range(nr_peaks))
+    intens = tuple(res[3 * i + 2] for i in range(nr_peaks))
+    offset = res[-1]
     return w0s, fwhms, intens, offset
+
+
+def fit_double_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
+    return fit_multi_lorentz(x, y, 2, bounds_w0, bounds_fwhm)
 
 
 def fit_quadruple_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
-    offset_guess = (y[0] + y[-1]) / 2.
-    # gam_guess = (w0_guess ** 2 * (np.max(y) - offset_guess)) ** -0.5
-    fwhm_guess = 10 * (x[-1] - x[0]) / x.shape[0] * np.ones(4)
-    intensity_guess = np.max(y) - offset_guess
-
-    # We run peak finding to get a good guess of the peak positions
-    # and use the four peaks with the highest prominence.
-    peaks, properties = find_peaks(y, prominence=1)
-    idx = np.argsort(properties['prominences'])[::-1]
-
-    # Return if we didn't find four peaks
-    if len(idx) < 4:
-        return
-
-    idx_sort = np.sort(peaks[idx[0:4]])
-    w0_guess = list(x[idx_sort])
-
-    def error(params, xdata, ydata):
-        return (ydata
-                - lorentz(xdata, *params[0:3])
-                - lorentz(xdata, *params[3:6])
-                - lorentz(xdata, *params[6:9])
-                - lorentz(xdata, *params[9:12])
-                - params[12]) ** 2
-
-    # Create the bounds array
-    if bounds_w0 is None and bounds_fwhm is None:
-        bounds = (-np.inf, np.inf)
-    else:
-        # Initialize the bounds
-        # Lower limits
-        bounds_lower = -np.inf * np.ones(13)
-        # Upper limits
-        bounds_upper = np.inf * np.ones(13)
-
-        # The VIPA spectrometer has an instrument width of
-        # approx. 750 MHz for the FOB setup
-        # and 180 MHz for the 780 nm setup.
-        # This is far higher than the step size,
-        # so we limit it to this.
-        fwhm_lower_bound = (x[-1] - x[0]) / x.shape[0]
-
-        # 1st peak:
-        # full-width-half-maximum
-        bounds_lower[1] = fwhm_lower_bound
-        # intensity
-        bounds_lower[2] = 0
-
-        # 2nd peak:
-        # full-width-half-maximum
-        bounds_lower[4] = fwhm_lower_bound
-        # intensity
-        bounds_lower[5] = 0
-
-        # 3rd peak:
-        # full-width-half-maximum
-        bounds_lower[7] = fwhm_lower_bound
-        # intensity
-        bounds_lower[8] = 0
-
-        # 4th peak:
-        # full-width-half-maximum
-        bounds_lower[10] = fwhm_lower_bound
-        # intensity
-        bounds_lower[11] = 0
-
-        # offset
-        bounds_lower[12] = 0
-
-        # If we have w0 bounds, set them
-        if bounds_w0 is not None:
-            # 1st peak central position
-            bounds_lower[0] = bounds_w0[0][0]
-            bounds_upper[0] = bounds_w0[0][1]
-            # 2nd peak central position
-            bounds_lower[3] = bounds_w0[1][0]
-            bounds_upper[3] = bounds_w0[1][1]
-            # 3rd peak central position
-            bounds_lower[6] = bounds_w0[2][0]
-            bounds_upper[6] = bounds_w0[2][1]
-            # 4th peak central position
-            bounds_lower[9] = bounds_w0[3][0]
-            bounds_upper[9] = bounds_w0[3][1]
-
-            # Check that the initial guesses are within the bounds
-            w0_guess = [np.clip(
-                guess, *bounds_w0[idx]) for idx, guess in enumerate(w0_guess)]
-
-        if bounds_fwhm is not None:
-            # 1st peak FWHM
-            bounds_lower[1] = bounds_fwhm[0][0]
-            bounds_upper[1] = bounds_fwhm[0][1]
-            # 2nd peak FWHM
-            bounds_lower[4] = bounds_fwhm[1][0]
-            bounds_upper[4] = bounds_fwhm[1][1]
-            # 3rd peak FWHM
-            bounds_lower[7] = bounds_fwhm[2][0]
-            bounds_upper[7] = bounds_fwhm[2][1]
-            # 4th peak FWHM
-            bounds_lower[10] = bounds_fwhm[3][0]
-            bounds_upper[10] = bounds_fwhm[3][1]
-
-            # Check that the initial guesses are within the bounds
-            fwhm_guess = [np.clip(
-                guess, *bounds_fwhm[idx]) for
-                idx, guess in enumerate(fwhm_guess)]
-
-        bounds = (bounds_lower, bounds_upper)
-
-    opt_result = least_squares(
-        error,
-        x0=(w0_guess[0], fwhm_guess[0], intensity_guess,
-            w0_guess[1], fwhm_guess[1], intensity_guess,
-            w0_guess[2], fwhm_guess[2], intensity_guess,
-            w0_guess[3], fwhm_guess[3], intensity_guess,
-            offset_guess
-            ),
-        args=(x, y),
-        bounds=bounds
-    )
-
-    if not opt_result.success:
-        raise FitError('Lorentz fit failed.')
-
-    res = opt_result.x
-    w0s, fwhms, intens = (res[0], res[3], res[6], res[9]), \
-                         (res[1], res[4], res[7], res[10]), \
-                         (res[2], res[5], res[8], res[11])
-    offset = res[12]
-    return w0s, fwhms, intens, offset
+    return fit_multi_lorentz(x, y, 4, bounds_w0, bounds_fwhm)
 
 
 def fit_circle(points):

@@ -243,6 +243,187 @@ def test_calculate_derived_values_different_region_count_nr_peaks_2():
     assert (evm.results['brillouin_shift_f'][4, :, :, :, 1, 1] == 3).all()
 
 
+def test_calculate_derived_values_fsr_method(mocker):
+    cm = CalibrationModel()
+    evm = EvaluationModel()
+    mocker.patch('bmlab.session.Session.calibration_model', return_value=cm)
+    mocker.patch('bmlab.session.Session.evaluation_model', return_value=evm)
+
+    cm.set_vipa_params('0', [(1, 2, 3, 15.0e9)])
+    evm.set_brillouin_shift_method('fsr')
+
+    # Initialize results array
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 2,
+    })
+
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, :] = 5.0e9
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, :] = 9.8e9
+    # The Rayleigh peak positions must not matter,
+    # so we set them to deliberately wrong values
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 0, :] = 1.0e9
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 1, :] = 14.0e9
+
+    calculate_derived_values()
+
+    # shift = (15.0 - (9.8 - 5.0)) / 2 = 5.1
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_f'], 5.1e9)
+
+
+def test_calculate_derived_values_fsr_method_nr_peaks_2(mocker):
+    cm = CalibrationModel()
+    evm = EvaluationModel()
+    mocker.patch('bmlab.session.Session.calibration_model', return_value=cm)
+    mocker.patch('bmlab.session.Session.evaluation_model', return_value=evm)
+
+    cm.set_vipa_params('0', [(1, 2, 3, 15.0e9)])
+    evm.set_brillouin_shift_method('fsr')
+
+    # Initialize results array
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_brillouin_peaks': 2,
+        'nr_rayleigh_regions': 2,
+    })
+
+    # Peak k of the Stokes region belongs
+    # to peak k of the Anti-Stokes region
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, :] = 5.0e9
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, :] = 9.8e9
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, 1] = 4.0e9
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, 1] = 11.2e9
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 0, :] = 0
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 1, :] = 15.0e9
+
+    calculate_derived_values()
+
+    shift = evm.results['brillouin_shift_f']
+    # shift = (15.0 - (9.8 - 5.0)) / 2 = 5.1
+    np.testing.assert_allclose(shift[:, :, :, :, 0, 0], 5.1e9)
+    np.testing.assert_allclose(shift[:, :, :, :, 1, 0], 5.1e9)
+    # shift = (15.0 - (11.2 - 4.0)) / 2 = 3.9
+    np.testing.assert_allclose(shift[:, :, :, :, 0, 1], 3.9e9)
+    np.testing.assert_allclose(shift[:, :, :, :, 1, 1], 3.9e9)
+    np.testing.assert_allclose(shift[:, :, :, :, 0, 2], 5.1e9)
+    np.testing.assert_allclose(shift[:, :, :, :, 1, 2], 5.1e9)
+
+
+def test_calculate_derived_values_fsr_fallback_single_region(mocker):
+    """
+    With only one Brillouin region we cannot use the FSR based
+    calculation and fall back to the Rayleigh peak based one.
+    """
+    cm = CalibrationModel()
+    evm = EvaluationModel()
+    mocker.patch('bmlab.session.Session.calibration_model', return_value=cm)
+    mocker.patch('bmlab.session.Session.evaluation_model', return_value=evm)
+
+    cm.set_vipa_params('0', [(1, 2, 3, 15.0e9)])
+    evm.set_brillouin_shift_method('fsr')
+
+    # Initialize results array
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 1,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 1,
+    })
+
+    evm.results['brillouin_peak_position_f'][:] = 5.0e9
+    evm.results['rayleigh_peak_position_f'][:] = 0
+
+    calculate_derived_values()
+
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_f'], 5.0e9)
+
+
+def test_calculate_derived_values_fsr_fallback_no_calibration(mocker):
+    """
+    Without a calibration we don't know the FSR and fall back
+    to the Rayleigh peak based calculation.
+    """
+    cm = CalibrationModel()
+    evm = EvaluationModel()
+    mocker.patch('bmlab.session.Session.calibration_model', return_value=cm)
+    mocker.patch('bmlab.session.Session.evaluation_model', return_value=evm)
+
+    evm.set_brillouin_shift_method('fsr')
+
+    # Initialize results array
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 2,
+    })
+
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, :] = 5.0e9
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, :] = 9.8e9
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 0, :] = 0
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 1, :] = 15.0e9
+
+    calculate_derived_values()
+
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_f'][:, :, :, :, 0, :], 5.0e9)
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_f'][:, :, :, :, 1, :], 5.2e9)
+
+
+def test_set_brillouin_shift_method_recalculates(mocker):
+    cm = CalibrationModel()
+    evm = EvaluationModel()
+    mocker.patch('bmlab.session.Session.calibration_model', return_value=cm)
+    mocker.patch('bmlab.session.Session.evaluation_model', return_value=evm)
+    evc = EvaluationController()
+
+    cm.set_vipa_params('0', [(1, 2, 3, 15.0e9)])
+
+    # Initialize results array
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 2,
+    })
+
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, :] = 5.0e9
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, :] = 9.8e9
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 0, :] = 0.2e9
+    evm.results['rayleigh_peak_position_f'][:, :, :, :, 1, :] = 15.0e9
+
+    # Rayleigh based: 5.0 - 0.2 = 4.8
+    evc.set_brillouin_shift_method('rayleigh')
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_f'][:, :, :, :, 0, :], 4.8e9)
+
+    # FSR based: (15.0 - (9.8 - 5.0)) / 2 = 5.1
+    evc.set_brillouin_shift_method('fsr')
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_f'], 5.1e9)
+
+
 def test_get_data_0D(mocker):
     evc = EvaluationController()
     evc.session.set_file(data_file_path('0D.h5'))

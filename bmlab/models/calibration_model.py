@@ -142,8 +142,14 @@ class CalibrationModel(Serializer):
 
         for key, fit in self.brillouin_fits.fits.items():
             if (fit.calib_key == calib_key) and (fit.frame_num == frame_num):
-                for w0 in fit.w0s:
+                # A failed multi-peak fit stores a single NaN instead of
+                # one value per peak, so we make sure to always iterate
+                for w0 in np.atleast_1d(fit.w0s):
                     peaks.append(w0)
+
+        # Drop peaks of failed fits, so a single failed fit
+        # does not prevent the whole calibration
+        peaks = [peak for peak in peaks if np.isfinite(peak)]
 
         return np.sort(np.array(peaks))
 
@@ -153,6 +159,25 @@ class CalibrationModel(Serializer):
     def clear_vipa_params(self, calib_key):
         if calib_key in self.vipa_params:
             del self.vipa_params[calib_key]
+
+    def get_fsr(self):
+        """
+        Returns the fitted VIPA free spectral range in Hz as the
+        mean over all calibrations and frames.
+
+        The FSR is a property of the VIPA cavity and does not
+        drift over time, so we don't interpolate it by time.
+
+        Returns
+        -------
+        The free spectral range in Hz,
+        None if no calibration is available.
+        """
+        fsrs = [params[3] for vipa_params in self.vipa_params.values()
+                for params in vipa_params]
+        if not fsrs:
+            return None
+        return np.nanmean(fsrs)
 
     def set_frequencies(self, calib_key, time, frequencies):
         self.frequencies[calib_key] = frequencies

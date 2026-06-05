@@ -264,6 +264,138 @@ def test_fit_quadruple_lorentz_with_bounds():
     np.testing.assert_almost_equal(actual_offset, offset, decimal=1)
 
 
+def test_fit_double_lorentz_weak_peak_with_noise():
+    """
+    A strong narrow peak next to a weak broad peak with noise:
+    global peak finding used to seed the second peak on a noise
+    spike, collapsing its fit. The per-window seeding finds it.
+    """
+    rng = np.random.RandomState(0)
+    x = np.linspace(0, 60, 400)
+    y_data = lorentz(x, 20, 2, 200) + lorentz(x, 42, 8, 12) + 150
+    y_data += rng.normal(0, 6, x.shape)
+
+    bounds_w0 = ((15, 25), (30, 55))
+
+    w0s, fwhms, intens, offset = fit_double_lorentz(x, y_data, bounds_w0)
+
+    assert abs(w0s[0] - 20) < 0.5
+    assert abs(w0s[1] - 42) < 2.0
+    assert intens[0] > 100
+    assert intens[1] > 5
+
+
+def test_fit_double_lorentz_peak_near_region_edge():
+    """
+    A peak whose maximum lies beyond the region edge is invisible
+    to peak finding, but is recovered by the per-window seeding.
+    """
+    rng = np.random.RandomState(2)
+    x = np.linspace(0, 59, 400)
+    y_data = lorentz(x, 20, 2, 100) + lorentz(x, 59.5, 5, 40) + 50
+    y_data += rng.normal(0, 2, x.shape)
+
+    bounds_w0 = ((15, 25), (50, 61))
+
+    w0s, fwhms, intens, offset = fit_double_lorentz(x, y_data, bounds_w0)
+
+    assert abs(w0s[0] - 20) < 0.5
+    assert abs(w0s[1] - 59.5) < 1.0
+    assert intens[1] > 20
+
+
+def test_fit_double_lorentz_single_peak_graceful():
+    """
+    With fewer detectable peaks than requested, the fit used to
+    return None (silently turning the result into NaN upstream).
+    It should return a valid result instead.
+    """
+    x = np.linspace(0, 60, 200)
+    y_data = lorentz(x, 30, 5, 10) + 5
+
+    result = fit_double_lorentz(x, y_data)
+
+    assert result is not None
+    w0s, fwhms, intens, offset = result
+    assert len(w0s) == 2
+    assert np.all(np.isfinite(w0s))
+    assert np.all(np.isfinite(intens))
+
+
+def test_fit_quadruple_lorentz_weak_peaks_with_noise():
+    rng = np.random.RandomState(3)
+    x = np.linspace(0, 60, 400)
+    y_data = lorentz(x, 10, 2, 150)\
+        + lorentz(x, 20, 6, 10)\
+        + lorentz(x, 40, 6, 12)\
+        + lorentz(x, 50, 2, 180) + 100
+    y_data += rng.normal(0, 4, x.shape)
+
+    bounds_w0 = ((5, 15), (15, 30), (30, 45), (45, 55))
+
+    w0s, fwhms, intens, offset = \
+        fit_quadruple_lorentz(x, y_data, bounds_w0)
+
+    assert abs(w0s[0] - 10) < 0.5
+    assert abs(w0s[1] - 20) < 2.0
+    assert abs(w0s[2] - 40) < 2.0
+    assert abs(w0s[3] - 50) < 0.5
+    assert intens[1] > 4
+    assert intens[2] > 4
+
+
+def test_fit_quadruple_lorentz_too_few_peaks_graceful():
+    x = np.linspace(0, 60, 200)
+    y_data = lorentz(x, 20, 5, 10) + lorentz(x, 40, 5, 10) + 5
+
+    result = fit_quadruple_lorentz(x, y_data)
+
+    assert result is not None
+    w0s, fwhms, intens, offset = result
+    assert len(w0s) == 4
+    assert np.all(np.isfinite(w0s))
+
+
+def test_find_degenerate_peaks():
+    from bmlab.fits import _find_degenerate_peaks, _create_lorentz_bounds
+
+    x = np.linspace(0, 60, 200)
+    y_data = lorentz(x, 20, 4, 10) + lorentz(x, 40, 4, 10) + 5
+    bounds = _create_lorentz_bounds(x, 2, ((15, 25), (35, 45)), None)
+
+    # Healthy fit
+    params = np.array([20, 4, 10, 40, 4, 10, 5])
+    assert _find_degenerate_peaks(x, y_data, params, bounds, 2) == []
+
+    # Second peak intensity collapsed
+    params = np.array([20, 4, 10, 40, 4, 0.01, 5])
+    assert _find_degenerate_peaks(x, y_data, params, bounds, 2) == [1]
+
+    # First peak pinned at its lower position bound
+    params = np.array([15.0, 4, 10, 40, 4, 10, 5])
+    assert 0 in _find_degenerate_peaks(x, y_data, params, bounds, 2)
+
+
+def test_create_retry_x0_reseeds_collapsed_peak():
+    from bmlab.fits import _create_retry_x0, _create_lorentz_bounds
+
+    x = np.linspace(0, 60, 600)
+    y_data = lorentz(x, 20, 2, 20) + lorentz(x, 40, 6, 8) + 10
+    bounds = _create_lorentz_bounds(x, 2, ((15, 25), (30, 50)), None)
+
+    # The first fit found the first peak,
+    # but the second peak collapsed
+    params = np.array([20, 2, 20, 30.0, 2, 0.0, 10])
+
+    x0 = _create_retry_x0(x, y_data, params, [1], bounds, 2)
+
+    # The healthy peak keeps its values
+    np.testing.assert_allclose(x0[0:3], params[0:3])
+    # The collapsed peak is reseeded near the residual maximum
+    assert abs(x0[3] - 40) < 1
+    assert x0[5] > 0
+
+
 def test_circle_fit():
     expect_r = 550
     expect_c = (-200, -220)
