@@ -382,6 +382,10 @@ def fit_lorentz_region(region, xdata, ydata, nr_peaks=1,
         idx_r = np.nanargmin(np.abs(xdata - region[1]))
         x = xdata[idx_l:idx_r]
         y = ydata[idx_l:idx_r]
+        # Mask all NaN values
+        mask = ~(np.isnan(x) | np.isnan(y))
+        x = x[mask]
+        y = y[mask]
         if nr_peaks == 1:
             w0s, fwhms, intensities, offset = fit_lorentz(
                 x, y)
