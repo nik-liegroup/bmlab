@@ -11,7 +11,8 @@ from bmlab import Session
 from bmlab.fits import fit_vipa, VIPA, fit_lorentz_region
 from bmlab.image import extract_lines_along_arc, find_max_in_radius
 from bmlab.export import FluorescenceExport, \
-    FluorescenceCombinedExport, BrillouinExport
+    FluorescenceCombinedExport, BrillouinExport, \
+    SurfaceExport, OverviewBrightfieldExport
 
 import warnings
 
@@ -485,8 +486,13 @@ class EvaluationController(ImageController):
 
         resolution = self.session.get_payload_resolution()
 
+        if not image_keys:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
         # Get first spectrum to find number of images
-        spectra, _, _ = self.extract_spectra('0')
+        spectra, _, _ = self.extract_spectra(image_keys[0])
 
         if not spectra:
             if max_count is not None:
@@ -844,17 +850,22 @@ class EvaluationController(ImageController):
 
         Returns
         -------
-        data: np.ndarray
-            The data to show. This is always a 3-dimensional array.
-        positions: list
+        data: np.ndarray or None
+            The data to show. This is always a 3-dimensional array,
+            or None if the current repetition has no valid
+            measurement grid (e.g. an aborted/restarted acquisition
+            that never wrote any positions).
+        positions: list or None
             This is a list of length 3 containing ndarrays with
-            the spatial positions of the data points.
-        dimensionality: int
-            Whether it's a 0, 1, 2, or 3D measurement
-        labels: list
-            The labels of the positions
+            the spatial positions of the data points, or None.
+        dimensionality: int or None
+            Whether it's a 0, 1, 2, or 3D measurement, or None.
+        labels: list or None
+            The labels of the positions, or None.
         """
         resolution = self.session.get_payload_resolution()
+        if resolution is None:
+            return None, None, None, None
 
         dimensionality = sum(np.array(resolution) > 1)
 
@@ -1079,6 +1090,12 @@ class ExportController(object):
                     'cax': ('min', 'max'),
                 }
             },
+            'surface': {
+                'export': True,
+            },
+            'overviewBrightfield': {
+                'export': True,
+            },
         }
 
     def export(self, configuration=None):
@@ -1093,3 +1110,5 @@ class ExportController(object):
         # Not really nice, but importing it in BrillouinExport
         # leads to a circular dependency.
         BrillouinExport(EvaluationController()).export(configuration)
+        SurfaceExport().export(configuration)
+        OverviewBrightfieldExport().export(configuration)

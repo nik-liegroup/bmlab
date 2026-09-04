@@ -9,7 +9,8 @@ from numpy import transpose
 import math
 
 from bmlab import __version__ as version
-from bmlab.file import BrillouinFile, is_source_file, is_session_file
+from bmlab.file import BrillouinFile, is_source_file, is_session_file, \
+    FLUORESCENCE_GROUP, OVERVIEW_BRIGHTFIELD_CHANNEL
 from bmlab.models.extraction_model import ExtractionModel
 from bmlab.models.orientation import Orientation
 from bmlab.models.setup import AVAILABLE_SETUPS
@@ -164,8 +165,12 @@ class Session(Serializer):
 
         repetitions = self.file.repetition_keys()
         for repetition in repetitions:
-            imgs = self.file.get_repetition(repetition).payload.get_image('0')
+            payload = self.file.get_repetition(repetition).payload
+            image_keys = payload.image_keys()
             # If no images are available, skip this repetition
+            if not image_keys:
+                continue
+            imgs = payload.get_image(image_keys[0])
             if imgs is None:
                 continue
             img = self.orientation.apply(imgs[0, ...])
@@ -180,8 +185,11 @@ class Session(Serializer):
 
         repetitions = self.file.repetition_keys()
         for repetition in repetitions:
-            binning_factor = self.file.get_repetition(repetition)\
-                .payload.get_binning_factor('0')
+            payload = self.file.get_repetition(repetition).payload
+            image_keys = payload.image_keys()
+            if not image_keys:
+                continue
+            binning_factor = payload.get_binning_factor(image_keys[0])
 
             em = self.extraction_models.get(repetition)
             arc_width = math.ceil(em.arc_width / binning_factor)
@@ -343,11 +351,65 @@ class Session(Serializer):
         if self.current_repetition() is None:
             return None
         positions = self.current_repetition().payload.positions
+        if positions is None:
+            return None
         # We need to correctly transpose the array to have the
         # axes in order x-y-z
         for axis in positions:
             positions[axis] = transpose(positions[axis], axes=(1, 2, 0))
         return positions
+
+    def current_fluorescence_repetition(self):
+        """
+        Returns the Fluorescence-mode repetition matching the
+        currently selected Brillouin repetition (by key), or None
+        if the file has no such Fluorescence repetition.
+        """
+        if self.file is None or self._current_repetition_key is None:
+            return None
+        if self._current_repetition_key not in \
+                self.file.repetition_keys(FLUORESCENCE_GROUP):
+            return None
+        return self.file.get_repetition(
+            self._current_repetition_key, FLUORESCENCE_GROUP)
+
+    def has_surface_scan(self):
+        rep = self.current_repetition()
+        return rep is not None and rep.payload.has_surface_scan()
+
+    def get_surface_scan_data(self):
+        rep = self.current_repetition()
+        if rep is None:
+            return None
+        return rep.payload.get_surface_scan_data()
+
+    def has_overview_brightfield(self):
+        rep = self.current_repetition()
+        return rep is not None and rep.payload.has_overview_brightfield()
+
+    def get_overview_brightfield_positions(self):
+        rep = self.current_repetition()
+        if rep is None:
+            return None
+        return rep.payload.get_overview_brightfield_positions()
+
+    def get_overview_brightfield_keys(self, sort_by_time=False):
+        rep = self.current_fluorescence_repetition()
+        if rep is None:
+            return []
+        return rep.payload.image_keys_by_channel(
+            OVERVIEW_BRIGHTFIELD_CHANNEL, sort_by_time=sort_by_time)
+
+    def get_overview_brightfield_image(self, image_key, frame_num=None):
+        rep = self.current_fluorescence_repetition()
+        if rep is None:
+            return None
+        imgs = rep.payload.get_image(image_key)
+        if imgs is None:
+            return None
+        if frame_num is not None:
+            imgs = imgs[frame_num, ...]
+        return self.orientation.apply(imgs)
 
     def clear(self):
         """
@@ -438,8 +500,10 @@ class Session(Serializer):
             evm = session.evaluation_model()
             if not hasattr(psm, 'brillouin_regions_f'):
                 evm.invalidate_results()
-            # We use the first measurement image here
-            time = session.get_payload_time('0')
+            # We use the first available measurement image here
+            image_keys = session.get_image_keys()
+            time = session.get_payload_time(image_keys[0]) \
+                if image_keys else None
 
             def region_to_region_f(regions, region):
                 region_f = cm.get_frequency_by_time(time, region)

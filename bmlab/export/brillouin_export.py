@@ -61,8 +61,11 @@ class BrillouinExport(object):
                     data, positions, dimensionality, labels =\
                         self.evc.get_data(parameter_key, brillouin_peak_index)
 
-                    # This only works for 2D and 3D data!
-                    if dimensionality < 2:
+                    # This only works for 2D and 3D data! dimensionality
+                    # is None if the repetition has no valid measurement
+                    # grid (e.g. an aborted/restarted acquisition that
+                    # never wrote any positions).
+                    if dimensionality is None or dimensionality < 2:
                         continue
 
                     # Subtract the mean value of the positions,

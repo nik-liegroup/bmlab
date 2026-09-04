@@ -227,6 +227,86 @@ def test_file_get_fluorescence_images():
     assert image.shape == (1, 700, 600)
 
 
+def test_file_payload_with_resolution_but_no_positions():
+    """
+    Regression test: a repetition from a more severely aborted/
+    restarted acquisition can have the resolution-x/y/z attributes
+    set (the grid was configured) but no positions-x/y/z datasets at
+    all (nothing was ever measured, so h5bm never wrote them). This
+    must be treated the same as "no valid measurement grid" - not
+    silently produce a bogus positions dict (np.array(None) does not
+    raise, unlike a missing resolution attribute would).
+    """
+    bf = BrillouinFile(
+        data_file_path('aborted_repetition0_no_positions.h5'))
+    rep = bf.get_repetition('0')
+    assert rep.payload.resolution is None
+    assert rep.payload.positions is None
+
+    # The working repetition is unaffected
+    rep = bf.get_repetition('1')
+    assert rep.payload.resolution is not None
+    assert rep.payload.positions is not None
+
+
+def test_file_has_no_surface_scan_data_by_default():
+    bf = BrillouinFile(data_file_path('Water.h5'))
+    rep = bf.get_repetition('0')
+    assert not rep.payload.has_surface_scan()
+    assert rep.payload.get_surface_scan_data() is None
+    assert not rep.payload.has_overview_brightfield()
+    assert rep.payload.get_overview_brightfield_positions() is None
+
+
+def test_file_get_surface_scan_data():
+    bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
+    rep = bf.get_repetition('0')
+    assert rep.payload.has_surface_scan()
+
+    data = rep.payload.get_surface_scan_data()
+    assert data['surface_found_mask'].shape == (3, 2)
+    assert data['surface_found_mask'][0, 0] == 1
+    assert data['surface_found_mask'][2, 1] == 2
+
+    assert data['roi_scan_plan_mask'].shape == (3, 2)
+    assert data['sampled_mask'].shape == (1, 3, 2)
+
+    assert data['sampled_x'].shape == (4,)
+    assert data['sampled_y'].shape == (4,)
+    assert data['sampled_z'].shape == (4,)
+
+    assert data['surface_follow_used'] == 1
+    assert data['surface_z_offset_um_used'] == 2.5
+    assert data['surface_verification_steps_used'] == 3
+
+
+def test_file_get_overview_brightfield_positions():
+    bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
+    rep = bf.get_repetition('0')
+    assert rep.payload.has_overview_brightfield()
+
+    positions = rep.payload.get_overview_brightfield_positions()
+    assert positions['tile_count'] == 2
+    assert positions['x'].shape == (2, 2)
+    assert positions['y'].shape == (2, 2)
+    assert positions['z'].shape == (2, 2)
+
+
+def test_file_get_overview_brightfield_images():
+    bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
+    mode = 'Fluorescence'
+    rep = bf.get_repetition('0', mode)
+
+    keys = rep.payload.image_keys_by_channel('Brightfield z overview')
+    assert keys == ['0', '1', '2', '3']
+
+    # Other channel values yield no matches
+    assert rep.payload.image_keys_by_channel('Red') == []
+
+    image = rep.payload.get_image(keys[0])
+    assert image.shape == (1, 20, 20)
+
+
 def test_file_get_scale_calibration():
     bf = BrillouinFile(data_file_path('Fluorescence.h5'))
     mode = 'Fluorescence'

@@ -18,6 +18,12 @@ from packaging import version
 BRILLOUIN_GROUP = 'Brillouin'
 FLUORESCENCE_GROUP = 'Fluorescence'
 
+# Channel name BrillouinAcquisition uses for brightfield overview
+# images recorded during a surface-following measurement. These are
+# stored as regular Fluorescence-mode images, distinguished only by
+# this channel attribute (no dedicated HDF5 group exists for them).
+OVERVIEW_BRIGHTFIELD_CHANNEL = 'Brightfield z overview'
+
 
 def _get_datetime(time_stamp):
     """ Convert the time stamp in the HDF file to Python datetime """
@@ -369,6 +375,23 @@ class MeasurementData(object):
         except Exception:
             return None
 
+    def image_keys_by_channel(self, channel, sort_by_time=False):
+        """
+        Returns the keys of the images in the payload whose channel
+        attribute matches the given value, optionally sorted by time.
+
+        Parameters
+        ----------
+        channel : str
+        sort_by_time : bool
+
+        Returns
+        -------
+        out: list of str
+        """
+        keys = self.image_keys(sort_by_time=sort_by_time)
+        return [key for key in keys if self.get_channel(key) == channel]
+
     def get_class(self, image_key):
         """"
         Returns the image class of a payload image
@@ -422,6 +445,43 @@ class MeasurementData(object):
 
 class Payload(MeasurementData):
 
+    # Datasets written by BrillouinAcquisition's surface-following scan
+    # (positions-<name> under the Brillouin payload group). Masks use
+    # the C-order shape they were written with, so a mask array can be
+    # indexed directly as mask[x_index, y_index] (2D masks) or
+    # mask[z_index, x_index, y_index] (3D masks) without transposing.
+    SURFACE_SCAN_MASKS = {
+        'surface_found_mask': 'positions-surface-found-mask',
+        'sampled_mask': 'positions-sampled-mask',
+        'roi_scan_plan_mask': 'positions-roi-scan-plan-mask',
+    }
+    SURFACE_SCAN_PATH = {
+        'sampled_x': 'positions-sampled-x',
+        'sampled_y': 'positions-sampled-y',
+        'sampled_z': 'positions-sampled-z',
+    }
+    SURFACE_SCAN_SETTINGS = {
+        'surface_follow_used': 'positions-surface-follow-used',
+        'surface_drop_fraction_used':
+            'positions-surface-drop-fraction-used',
+        'surface_medium_reference_value_used':
+            'positions-surface-medium-reference-value-used',
+        'surface_z_offset_um_used': 'positions-surface-z-offset-um-used',
+        'surface_follow_half_range_um_used':
+            'positions-surface-follow-half-range-um-used',
+        'surface_max_rewind_um_used':
+            'positions-surface-max-rewind-um-used',
+        'surface_verification_steps_used':
+            'positions-surface-verification-steps-used',
+        'surface_verification_frame_average_used':
+            'positions-surface-verification-frame-average-used',
+        'surface_verification_tolerance_fraction_used':
+            'positions-surface-verification-tolerance-fraction-used',
+        'roi_mask_used': 'positions-roi-mask-used',
+        'grid_coordinates_absolute':
+            'positions-grid-coordinates-absolute',
+    }
+
     def __init__(self, payload_group, repetition):
         """
         Creates a payload representation from the corresponding group of a
@@ -434,18 +494,115 @@ class Payload(MeasurementData):
 
         """
         super(Payload, self).__init__(payload_group, repetition)
-        # Only Brillouin payloads have a resolution and positions
+        # Only Brillouin payloads have a resolution and positions.
+        # A repetition from an aborted/restarted acquisition can have
+        # the resolution attributes set but no positions-x/y/z
+        # datasets at all (nothing was ever measured). h5py's .get()
+        # then returns None, and np.array(None) does NOT raise - it
+        # silently produces a bogus 0-d object array - so we have to
+        # check for that explicitly instead of relying on the except
+        # below to catch it.
         try:
             self.resolution = tuple(int(payload_group.attrs.get(
                 'resolution-%s' % axis)[0]) for axis in ['x', 'y', 'z'])
+            positions_x = payload_group.get('positions-x')
+            positions_y = payload_group.get('positions-y')
+            positions_z = payload_group.get('positions-z')
+            if positions_x is None \
+                    or positions_y is None \
+                    or positions_z is None:
+                raise BadFileException(
+                    'Payload has no positions-x/y/z datasets')
             self.positions = {
-                'x': np.array(payload_group.get('positions-x')),
-                'y': np.array(payload_group.get('positions-y')),
-                'z': np.array(payload_group.get('positions-z')),
+                'x': np.array(positions_x),
+                'y': np.array(positions_y),
+                'z': np.array(positions_z),
             }
         except BaseException:
             self.resolution = None
             self.positions = None
+
+    def has_surface_scan(self):
+        """
+        Returns whether this payload contains data from a
+        surface-following scan (BrillouinAcquisition >= the
+        "major surface scanning update", H5BM-v0.0.4, no version
+        bump so this can only be detected from dataset presence).
+        """
+        return self.group is not None and \
+            self.group.get(
+                self.SURFACE_SCAN_MASKS['surface_found_mask']) is not None
+
+    def get_surface_scan_data(self):
+        """
+        Returns a dict with the surface-scan masks, the actually
+        sampled path and the scan settings that were used, or None
+        if this payload does not contain surface-scan data.
+
+        Returns
+        -------
+        out: dict or None
+            'surface_found_mask': ndarray[x, y], 0=not found,
+                1=found by measurement, 2=gap-filled/interpolated
+            'sampled_mask': ndarray[z, x, y], 1 if that grid point
+                was actually sampled
+            'roi_scan_plan_mask': ndarray[x, y], 1 if inside the
+                planned ROI polygon
+            'sampled_x'/'sampled_y'/'sampled_z': ndarray, the actually
+                sampled path in acquisition order
+            plus the scalar settings listed in SURFACE_SCAN_SETTINGS
+        """
+        if not self.has_surface_scan():
+            return None
+        data = {}
+        for key, dataset_name in self.SURFACE_SCAN_MASKS.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds) if ds is not None else None
+        for key, dataset_name in self.SURFACE_SCAN_PATH.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds) if ds is not None else None
+        for key, dataset_name in self.SURFACE_SCAN_SETTINGS.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds).flatten()[0] if ds is not None else None
+        return data
+
+    def has_overview_brightfield(self):
+        """
+        Returns whether stage positions for brightfield overview
+        images (recorded alongside a surface-following scan) are
+        present for this payload.
+        """
+        return self.group is not None and \
+            self.group.get('positions-overview-brightfield-x') is not None
+
+    def get_overview_brightfield_positions(self):
+        """
+        Returns the stage positions of the brightfield overview
+        images recorded during the measurement.
+
+        Returns
+        -------
+        out: dict or None
+            'x'/'y'/'z': ndarray, reshaped to (z_steps, tile_count)
+                if more than one tile was recorded per z-slice,
+                otherwise a flat 1D array of length z_steps
+            'tile_count': int
+        """
+        if not self.has_overview_brightfield():
+            return None
+        tile_count_ds = self.group.get(
+            'positions-overview-brightfield-tile-count')
+        tile_count = int(np.array(tile_count_ds).flatten()[0]) \
+            if tile_count_ds is not None else 1
+        positions = {}
+        for axis in ('x', 'y', 'z'):
+            arr = np.array(
+                self.group.get('positions-overview-brightfield-' + axis))
+            if tile_count > 1 and arr.size % tile_count == 0:
+                arr = arr.reshape((-1, tile_count))
+            positions[axis] = arr
+        positions['tile_count'] = tile_count
+        return positions
 
     def get_scale_calibration(self):
         parameters = [

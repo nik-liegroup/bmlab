@@ -275,6 +275,28 @@ def test_get_data_0D(mocker):
     assert labels == [r'$x$ [$\mu$m]', r'$y$ [$\mu$m]', r'$z$ [$\mu$m]']
 
 
+def test_get_data_no_valid_grid():
+    """
+    Regression test: EvaluationController.get_data() must not raise
+    for a repetition with no valid measurement grid (e.g. an aborted/
+    restarted acquisition with resolution attributes but no
+    positions-x/y/z datasets) - it should return a clean (None, None,
+    None, None) sentinel instead, so callers can bail out gracefully.
+    """
+    evc = EvaluationController()
+    evc.session.set_file(
+        data_file_path('aborted_repetition0_no_positions.h5'))
+    evc.session.set_current_repetition('0')
+
+    data, positions, dimensionality, labels = \
+        evc.get_data('brillouin_shift_f')
+
+    assert data is None
+    assert positions is None
+    assert dimensionality is None
+    assert labels is None
+
+
 def test_get_data_1D_x(mocker):
     evc = EvaluationController()
     evc.session.set_file(data_file_path('1D-x.h5'))

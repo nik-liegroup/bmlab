@@ -231,8 +231,12 @@ class FluorescenceCombinedExport(object):
                     # Get the repetition
                     repetition_bm = self.file.get_repetition(
                         brillouin_repetition)
-                    # Read the Brillouin positions
+                    # Read the Brillouin positions. A repetition from
+                    # an aborted/restarted acquisition can have no
+                    # valid positions at all.
                     positions = repetition_bm.payload.positions
+                    if positions is None:
+                        continue
                     x_min = np.nanmin(positions['x'])
                     x_max = np.nanmax(positions['x'])
                     y_min = np.nanmin(positions['y'])
