@@ -123,6 +123,70 @@ def test_deserialize_session_file(session_file):
     session.clear()
 
 
+def test_crop_restricts_images_and_survives_save_load(tmp_dir):
+    session = Session.get_instance()
+
+    shutil.copy(data_file_path('Water.h5'), Path.cwd() / 'Water.h5')
+    session.set_file('Water.h5')
+    session.set_current_repetition('0')
+
+    img = session.get_payload_image('0', 0)
+    assert img.shape == (400, 400)
+    assert session.get_crop_bounds() is None
+
+    session.set_crop_bounds((50, 250, 100, 300))
+    img_cropped = session.get_payload_image('0', 0)
+    assert img_cropped.shape == (200, 200)
+    assert np.array_equal(img_cropped, img[50:250, 100:300])
+
+    calib_key = session.get_calib_keys()[0]
+    calib_img = session.get_calibration_image(calib_key, 0)
+    assert calib_img.shape == (200, 200)
+
+    session.save()
+    session.clear()
+
+    session.set_file('Water.h5')
+    assert session.get_crop_bounds() == (50, 250, 100, 300)
+    assert session.get_payload_image('0', 0).shape == (200, 200)
+
+    session.clear_crop()
+    assert session.get_crop_bounds() is None
+    assert session.get_payload_image('0', 0).shape == (400, 400)
+
+    session.clear()
+
+
+def test_crop_with_no_bounds_survives_save_load(tmp_dir):
+    """
+    Regression test: Serializer.do_serialize() silently omits any
+    attribute that is None at save time (see Serializer.do_serialize),
+    so saving a session where set_crop_bounds() was never called
+    (bounds stays None, the common case) produced a saved Crop group
+    with no 'bounds' entry at all. Reloading it then left session.crop
+    without a 'bounds' attribute entirely - AttributeError: 'Crop'
+    object has no attribute 'bounds' - the moment anything tried to
+    use it (e.g. opening the file again, which calls
+    Session.set_image_shape() -> Crop.apply()).
+    """
+    session = Session.get_instance()
+
+    shutil.copy(data_file_path('Water.h5'), Path.cwd() / 'Water.h5')
+    session.set_file('Water.h5')
+    session.set_current_repetition('0')
+    assert session.get_crop_bounds() is None
+
+    session.save()
+    session.clear()
+
+    # Must not raise.
+    session.set_file('Water.h5')
+    assert session.get_crop_bounds() is None
+    assert session.get_payload_image('0', 0).shape == (400, 400)
+
+    session.clear()
+
+
 def test_serialize_fitset(tmp_dir):
 
     fit_set = FitSet()

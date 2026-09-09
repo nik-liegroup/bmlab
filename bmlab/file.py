@@ -18,6 +18,12 @@ from packaging import version
 BRILLOUIN_GROUP = 'Brillouin'
 FLUORESCENCE_GROUP = 'Fluorescence'
 
+# Channel name BrillouinAcquisition uses for brightfield overview
+# images recorded during a surface-following measurement. These are
+# stored as regular Fluorescence-mode images, distinguished only by
+# this channel attribute (no dedicated HDF5 group exists for them).
+OVERVIEW_BRIGHTFIELD_CHANNEL = 'Brightfield z overview'
+
 
 def _get_datetime(time_stamp):
     """ Convert the time stamp in the HDF file to Python datetime """
@@ -369,6 +375,23 @@ class MeasurementData(object):
         except Exception:
             return None
 
+    def image_keys_by_channel(self, channel, sort_by_time=False):
+        """
+        Returns the keys of the images in the payload whose channel
+        attribute matches the given value, optionally sorted by time.
+
+        Parameters
+        ----------
+        channel : str
+        sort_by_time : bool
+
+        Returns
+        -------
+        out: list of str
+        """
+        keys = self.image_keys(sort_by_time=sort_by_time)
+        return [key for key in keys if self.get_channel(key) == channel]
+
     def get_class(self, image_key):
         """"
         Returns the image class of a payload image
@@ -419,8 +442,113 @@ class MeasurementData(object):
         except BaseException:
             return None
 
+    def get_position(self, image_key):
+        """
+        Returns the xyz position (in µm) that a Fluorescence-group image
+        was targeted at, or None if not recorded (older files, or an
+        image outside the Fluorescence group).
+
+        For regular Fluorescence-mode images this is the actual capture
+        position (single-point capture, no separate stage position is
+        recorded). For brightfield overview images it is the *intended*
+        target, which can differ slightly from the actual stage position
+        - see get_stage_position().
+        """
+        try:
+            attrs = self.data.get(image_key).attrs
+            return {
+                axis: attrs.get('position_' + axis + '_um')[0]
+                for axis in ('x', 'y', 'z')
+            }
+        except BaseException:
+            return None
+
+    def get_stage_position(self, image_key):
+        """
+        Returns the actual stage xyz position (in µm) read back at
+        capture time, or None if not recorded. Only present for
+        brightfield overview images, where the stage moves away and
+        back and so can differ slightly from the target position
+        returned by get_position() due to hysteresis compensation and
+        backlash.
+        """
+        try:
+            attrs = self.data.get(image_key).attrs
+            return {
+                axis: attrs.get('stage_position_' + axis + '_um')[0]
+                for axis in ('x', 'y', 'z')
+            }
+        except BaseException:
+            return None
+
 
 class Payload(MeasurementData):
+
+    # Datasets written by BrillouinAcquisition's surface-following scan
+    # (positions-<name> under the Brillouin payload group). Masks use
+    # the C-order shape they were written with, so a mask array can be
+    # indexed directly as mask[x_index, y_index] (2D masks) or
+    # mask[z_index, x_index, y_index] (3D masks) without transposing.
+    SURFACE_SCAN_MASKS = {
+        'surface_found_mask': 'positions-surface-found-mask',
+        'sampled_mask': 'positions-sampled-mask',
+        'roi_scan_plan_mask': 'positions-roi-scan-plan-mask',
+    }
+    SURFACE_SCAN_PATH = {
+        'sampled_x': 'positions-sampled-x',
+        'sampled_y': 'positions-sampled-y',
+        'sampled_z': 'positions-sampled-z',
+        # The ROI polygon drawn at acquisition time (stage um),
+        # independent of its grid-discretized 'roi_scan_plan_mask'.
+        'roi_polygon_x': 'positions-roi-polygon-x-um',
+        'roi_polygon_y': 'positions-roi-polygon-y-um',
+        # The coarse (binned) x/y sample grid runSurfacePreScan() itself
+        # actually probed, before any interpolation onto the dense
+        # scan-plan grid - the genuinely sparse "real coordinates used
+        # in coarse-grain mode to find a surface". Only present on
+        # files saved by a BrillouinAcquisition build that records this
+        # (see Brillouin::m_surfacePreScanXUm/YUm) - None otherwise, in
+        # which case no coarse pre-scan plot should be produced (the
+        # dense surface-found-mask is not a substitute - it lives at
+        # the dense grid's own resolution, not the coarse pre-scan's).
+        'prescan_x': 'positions-surface-prescan-x-um',
+        'prescan_y': 'positions-surface-prescan-y-um',
+    }
+    # 2D, shape (len(prescan_x), len(prescan_y)) - same 0/1/2 "found"
+    # convention as SURFACE_SCAN_MASKS['surface_found_mask'], at the
+    # coarse pre-scan's own resolution.
+    SURFACE_PRESCAN_MASKS = {
+        'prescan_found_mask': 'positions-surface-prescan-found-mask',
+        'prescan_z': 'positions-surface-prescan-z-um',
+        'prescan_metric': 'positions-surface-prescan-metric',
+    }
+    SURFACE_SCAN_SETTINGS = {
+        'surface_follow_used': 'positions-surface-follow-used',
+        'surface_drop_fraction_used':
+            'positions-surface-drop-fraction-used',
+        'surface_medium_reference_value_used':
+            'positions-surface-medium-reference-value-used',
+        'surface_z_offset_um_used': 'positions-surface-z-offset-um-used',
+        'surface_follow_half_range_um_used':
+            'positions-surface-follow-half-range-um-used',
+        'surface_max_rewind_um_used':
+            'positions-surface-max-rewind-um-used',
+        'surface_verification_steps_used':
+            'positions-surface-verification-steps-used',
+        'surface_verification_frame_average_used':
+            'positions-surface-verification-frame-average-used',
+        'surface_verification_tolerance_fraction_used':
+            'positions-surface-verification-tolerance-fraction-used',
+        'roi_mask_used': 'positions-roi-mask-used',
+        'grid_coordinates_absolute':
+            'positions-grid-coordinates-absolute',
+        # The medium-reference-derived drop threshold runSurfacePreScan()
+        # actually used - (1 - surface_drop_fraction_used) *
+        # surface_medium_reference_value_used, saved directly so it
+        # doesn't need reconstructing from those two fields.
+        'surface_reference_threshold':
+            'positions-surface-reference-threshold-computed',
+    }
 
     def __init__(self, payload_group, repetition):
         """
@@ -434,18 +562,225 @@ class Payload(MeasurementData):
 
         """
         super(Payload, self).__init__(payload_group, repetition)
-        # Only Brillouin payloads have a resolution and positions
+        # Only Brillouin payloads have a resolution and positions.
+        # A repetition from an aborted/restarted acquisition can have
+        # the resolution attributes set but no positions-x/y/z
+        # datasets at all (nothing was ever measured). h5py's .get()
+        # then returns None, and np.array(None) does NOT raise - it
+        # silently produces a bogus 0-d object array - so we have to
+        # check for that explicitly instead of relying on the except
+        # below to catch it.
         try:
             self.resolution = tuple(int(payload_group.attrs.get(
                 'resolution-%s' % axis)[0]) for axis in ['x', 'y', 'z'])
+            positions_x = payload_group.get('positions-x')
+            positions_y = payload_group.get('positions-y')
+            positions_z = payload_group.get('positions-z')
+            if positions_x is None \
+                    or positions_y is None \
+                    or positions_z is None:
+                raise BadFileException(
+                    'Payload has no positions-x/y/z datasets')
             self.positions = {
-                'x': np.array(payload_group.get('positions-x')),
-                'y': np.array(payload_group.get('positions-y')),
-                'z': np.array(payload_group.get('positions-z')),
+                'x': np.array(positions_x),
+                'y': np.array(positions_y),
+                'z': np.array(positions_z),
             }
+            self._reconstruct_surface_follow_z()
         except BaseException:
             self.resolution = None
             self.positions = None
+
+    def _reconstruct_surface_follow_z(self):
+        """
+        BrillouinAcquisition versions before the fix for the surface-follow
+        z metadata bug wrote positions-z as a flat nominal grid (the same z
+        for every x, y at a given z-index), discarding the real,
+        surface-corrected z actually used at each (x, y) - even though that
+        real value is available separately, in acquisition order, as
+        positions-sampled-x/y/z (always written on every acquisition, not
+        only surface-following ones - see get_surface_scan_data()).
+
+        Reconstructs the true per-point z from that path here: each sampled
+        point is matched back to its (x_index, y_index) grid column by its
+        (x, y) position (unaffected by the bug, so still a reliable key),
+        then z values within a column are assigned by ascending sort - z
+        increases monotonically with z-index by construction (the grid is
+        stepped through in order), so this recovers the correct z even
+        without the original acquisition-order-to-grid-index mapping
+        (which isn't itself stored in the file).
+
+        Falls back silently to the nominal positions-z already in
+        self.positions['z'] for any (x, y) column with no matching sampled
+        points, and for files old enough not to have positions-sampled-*
+        at all.
+        """
+        sampled_x_ds = self.group.get('positions-sampled-x')
+        sampled_y_ds = self.group.get('positions-sampled-y')
+        sampled_z_ds = self.group.get('positions-sampled-z')
+        if sampled_x_ds is None \
+                or sampled_y_ds is None \
+                or sampled_z_ds is None:
+            return
+        sampled_x = np.array(sampled_x_ds)
+        sampled_y = np.array(sampled_y_ds)
+        sampled_z = np.array(sampled_z_ds)
+        if sampled_x.size == 0:
+            return
+
+        nz, nx, ny = self.positions['z'].shape
+        x_grid = self.positions['x'][0, :, 0]
+        y_grid = self.positions['y'][0, 0, :]
+
+        for ix in range(nx):
+            x_match = np.isclose(sampled_x, x_grid[ix])
+            if not np.any(x_match):
+                continue
+            for iy in range(ny):
+                mask = x_match & np.isclose(sampled_y, y_grid[iy])
+                if not np.any(mask):
+                    continue
+                zs = np.sort(sampled_z[mask])
+                n = min(zs.size, nz)
+                self.positions['z'][:n, ix, iy] = zs[:n]
+
+    def has_surface_scan(self):
+        """
+        Returns whether this payload contains data from a
+        surface-following scan (BrillouinAcquisition >= the
+        "major surface scanning update", H5BM-v0.0.4, no version
+        bump so this can only be detected from dataset presence).
+        """
+        return self.group is not None and \
+            self.group.get(
+                self.SURFACE_SCAN_MASKS['surface_found_mask']) is not None
+
+    def get_surface_scan_data(self):
+        """
+        Returns a dict with the surface-scan masks, the actually
+        sampled path and the scan settings that were used, or None
+        if this payload does not contain surface-scan data.
+
+        Returns
+        -------
+        out: dict or None
+            'surface_found_mask': ndarray[x, y], 0=not found,
+                1=found by measurement, 2=gap-filled/interpolated
+            'sampled_mask': ndarray[z, x, y], 1 if that grid point
+                was actually sampled
+            'roi_scan_plan_mask': ndarray[x, y], 1 if inside the
+                planned ROI polygon
+            'sampled_x'/'sampled_y'/'sampled_z': ndarray, the actually
+                sampled path in acquisition order
+            'roi_polygon_x'/'roi_polygon_y': ndarray, the ROI polygon
+                drawn at acquisition time (stage um) - the un-
+                discretized shape 'roi_scan_plan_mask' was rasterized
+                from
+            'prescan_x'/'prescan_y': ndarray, the coarse (binned) x/y
+                sample grid the surface pre-scan itself actually
+                probed (stage um) - only present on newer files (see
+                SURFACE_SCAN_PATH)
+            'prescan_found_mask'/'prescan_z'/'prescan_metric':
+                ndarray[len(prescan_x), len(prescan_y)], the pre-
+                scan's own result at its own (coarse) resolution -
+                only present alongside prescan_x/prescan_y
+            plus the scalar settings listed in SURFACE_SCAN_SETTINGS
+        """
+        if not self.has_surface_scan():
+            return None
+        data = {}
+        for key, dataset_name in self.SURFACE_SCAN_MASKS.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds) if ds is not None else None
+        for key, dataset_name in self.SURFACE_SCAN_PATH.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds) if ds is not None else None
+        # Only meaningful together with prescan_x/prescan_y (absent on
+        # older files) - skip entirely rather than returning arrays
+        # with no coordinates to plot them against.
+        if data.get('prescan_x') is not None \
+                and data.get('prescan_y') is not None:
+            for key, dataset_name in self.SURFACE_PRESCAN_MASKS.items():
+                ds = self.group.get(dataset_name)
+                data[key] = np.array(ds) if ds is not None else None
+        for key, dataset_name in self.SURFACE_SCAN_SETTINGS.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds).flatten()[0] if ds is not None else None
+        return data
+
+    def has_overview_brightfield(self):
+        """
+        Returns whether stage positions for brightfield overview
+        images (recorded alongside a surface-following scan) are
+        present for this payload.
+        """
+        return self.group is not None and \
+            self.group.get('positions-overview-brightfield-x') is not None
+
+    def get_overview_brightfield_positions(self):
+        """
+        Returns the stage positions of the brightfield overview
+        images recorded during the measurement.
+
+        BrillouinAcquisition versions with the BF overview coverage
+        modes update (multiple capture points per z-slice, with a
+        possibly non-uniform stack depth per point, e.g. one point
+        keeping its full z-stack while the others are single images)
+        write 'positions-overview-brightfield-point-count' and
+        '...-point-stack-counts' instead of the older, single
+        '...-tile-count'. Older files only have the latter, which
+        always implies a stack depth of 1 per point.
+
+        Returns
+        -------
+        out: dict or None
+            'x'/'y'/'z': ndarray, reshaped to (z_steps, total_per_z)
+                if more than one image was recorded per z-slice,
+                otherwise a flat 1D array of length z_steps.
+                total_per_z is the sum of 'point_stack_counts'; use it
+                together with 'point_stack_counts' to slice out each
+                point's own (contiguous) block of columns.
+            'point_count': int, number of distinct capture points
+                sampled per z-slice
+            'point_stack_counts': ndarray of int, length 'point_count',
+                the stack depth recorded for each of those points
+            'tile_count': int, kept for backward compatibility, equal
+                to total_per_z (the reshaped array's column count)
+        """
+        if not self.has_overview_brightfield():
+            return None
+        point_count_ds = self.group.get(
+            'positions-overview-brightfield-point-count')
+        if point_count_ds is not None:
+            point_count = int(np.array(point_count_ds).flatten()[0])
+            stack_counts_ds = self.group.get(
+                'positions-overview-brightfield-point-stack-counts')
+            point_stack_counts = np.array(
+                stack_counts_ds).flatten().astype(int) \
+                if stack_counts_ds is not None \
+                else np.ones(point_count, dtype=int)
+        else:
+            # Files from before the BF overview coverage modes update
+            # only wrote a single tile-count (always one image per
+            # point, i.e. a stack depth of 1).
+            tile_count_ds = self.group.get(
+                'positions-overview-brightfield-tile-count')
+            point_count = int(np.array(tile_count_ds).flatten()[0]) \
+                if tile_count_ds is not None else 1
+            point_stack_counts = np.ones(point_count, dtype=int)
+
+        total_per_z = int(point_stack_counts.sum()) if point_count else 1
+        positions = {}
+        for axis in ('x', 'y', 'z'):
+            arr = np.array(
+                self.group.get('positions-overview-brightfield-' + axis))
+            if total_per_z > 1 and arr.size % total_per_z == 0:
+                arr = arr.reshape((-1, total_per_z))
+            positions[axis] = arr
+        positions['point_count'] = point_count
+        positions['point_stack_counts'] = point_stack_counts
+        positions['tile_count'] = total_per_z
+        return positions
 
     def get_scale_calibration(self):
         parameters = [

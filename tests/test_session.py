@@ -112,6 +112,26 @@ def test_session_aborted_repetition():
     session.set_current_repetition('1')
 
 
+def test_session_aborted_repetition_with_no_positions():
+    """
+    Regression test: selecting a repetition that has resolution
+    attributes but no positions-x/y/z datasets at all (a more
+    severely aborted/restarted acquisition) must not raise - it
+    should behave the same as any other "no valid data" repetition.
+    """
+    session = Session.get_instance()
+    session.set_file(
+        data_file_path('aborted_repetition0_no_positions.h5'))
+
+    session.set_current_repetition('0')
+    assert session.get_payload_resolution() is None
+    assert session.get_payload_positions() is None
+
+    session.set_current_repetition('1')
+    assert session.get_payload_resolution() is not None
+    assert session.get_payload_positions() is not None
+
+
 def test_session_get_calib_keys():
     session = Session.get_instance()
     session.set_file(data_file_path('2D-xy.h5'))
@@ -135,3 +155,43 @@ def test_session_get_image_keys():
            ['0', '3', '6', '9', '12',
             '1', '4', '7', '10', '13',
             '2', '5', '8', '11', '14']
+
+
+def test_session_has_no_surface_scan_by_default():
+    session = Session.get_instance()
+    session.set_file(data_file_path('Water.h5'))
+    session.set_current_repetition('0')
+
+    assert not session.has_surface_scan()
+    assert session.get_surface_scan_data() is None
+    assert not session.has_overview_brightfield()
+    assert session.get_overview_brightfield_positions() is None
+    assert session.get_overview_brightfield_keys() == []
+    assert session.get_overview_brightfield_image('0') is None
+
+
+def test_session_get_surface_scan_data():
+    session = Session.get_instance()
+    session.set_file(data_file_path('SurfaceScan.h5'))
+    session.set_current_repetition('0')
+
+    assert session.has_surface_scan()
+    data = session.get_surface_scan_data()
+    assert data['surface_found_mask'].shape == (3, 2)
+
+
+def test_session_get_overview_brightfield():
+    session = Session.get_instance()
+    session.set_file(data_file_path('SurfaceScan.h5'))
+    session.set_current_repetition('0')
+
+    assert session.has_overview_brightfield()
+
+    keys = session.get_overview_brightfield_keys()
+    assert keys == ['0', '1', '2', '3']
+
+    image = session.get_overview_brightfield_image(keys[0])
+    assert image.shape == (1, 20, 20)
+
+    positions = session.get_overview_brightfield_positions()
+    assert positions['tile_count'] == 2
