@@ -1,9 +1,12 @@
 import os
 import numpy as np
-from skimage import transform
 from PIL import Image
 
 from bmlab import Session
+from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL
+from bmlab.export.timing import get_brillouin_windows, classify_timing, \
+    sanitize_for_filename
+from bmlab.export.alignment import get_tmatrix, warp_local
 
 
 class FluorescenceExport(object):
@@ -23,34 +26,59 @@ class FluorescenceExport(object):
             return
 
         fluorescence_repetitions = self.file.repetition_keys(self.mode)
-        brillouin_repetitions = self.file.repetition_keys()
+        brillouin_windows = get_brillouin_windows(self.file)
 
         # Loop over all fluorescence repetitions
         for fluorescence_repetition in fluorescence_repetitions:
             # Get the repetition
             repetition = self.file.get_repetition(
                 fluorescence_repetition, self.mode)
-            # Get the keys for all images in this repetition
-            image_keys = repetition.payload.image_keys()
+            # Get the keys for all images in this repetition, excluding
+            # the brightfield z-stack/mosaic overview images - those are
+            # handled separately by OverviewBrightfieldExport.
+            image_keys = [
+                key for key in repetition.payload.image_keys()
+                if repetition.payload.get_channel(key)
+                != OVERVIEW_BRIGHTFIELD_CHANNEL
+            ]
+            if not image_keys:
+                continue
+
+            # Two images sharing the same channel within one repetition
+            # would otherwise produce the same filename and silently
+            # overwrite each other - number them if that happens.
+            channels_seen = [
+                repetition.payload.get_channel(key) for key in image_keys]
+            channel_counts = {
+                channel: channels_seen.count(channel)
+                for channel in set(channels_seen)}
+            channel_occurrence = {}
+
+            keys_by_time = repetition.payload.image_keys(sort_by_time=True)
+            timing = classify_timing(
+                repetition.payload.get_date(keys_by_time[0]),
+                repetition.payload.get_date(keys_by_time[-1]),
+                brillouin_windows)
+            if timing:
+                timing_part = f"_{timing[1]}Acq" \
+                              f"_FLrep{fluorescence_repetition}" \
+                              f"_BMrep{timing[0]}"
+            else:
+                timing_part = f"_FLrep{fluorescence_repetition}"
+
             # Get the scale calibration
             scale_calibration = repetition.payload.get_scale_calibration()
-            if scale_calibration is None:
-                tmatrix = None
-            else:
-                # Create the transform matrix for the affine transformation
-                n = np.linalg.norm(
-                    np.array(scale_calibration['micrometerToPixX']))
-                tmatrix = np.matrix([
-                    [-1 * scale_calibration['micrometerToPixY'][1],
-                     -1 * scale_calibration['micrometerToPixY'][0], 0],
-                    [-1 * scale_calibration['micrometerToPixX'][1],
-                     -1 * scale_calibration['micrometerToPixX'][0], 0],
-                    [0, 0, n]
-                ]) / n
+            tmatrix = get_tmatrix(scale_calibration)
 
             # Loop over all images in this repetition
             for image_key in image_keys:
                 channel = repetition.payload.get_channel(image_key)
+                channel_tag = sanitize_for_filename(channel)
+                if channel_counts[channel] > 1:
+                    channel_occurrence[channel] = \
+                        channel_occurrence.get(channel, -1) + 1
+                    channel_tag = \
+                        f"{channel_tag}-{channel_occurrence[channel]}"
                 img_data = repetition.payload.get_image(image_key)
 
                 # Average all images acquired if grayscale
@@ -73,105 +101,42 @@ class FluorescenceExport(object):
                     path = self.file.path.parent
                 if not os.path.exists(path):
                     os.mkdir(path)
-                filename = path / f"{self.file.path.stem}" \
-                                  f"_FLrep{fluorescence_repetition}" \
-                                  f"_channel{channel}.png"
-                image = Image.fromarray(img_data)
-                if channel.casefold() == 'red':
-                    blank = Image.new("L", image.size)
-                    image = Image.merge("RGB", (image, blank, blank))
 
-                if channel.casefold() == 'green':
-                    blank = Image.new("L", image.size)
-                    image = Image.merge("RGB", (blank, image, blank))
+                def build_image(data):
+                    image = Image.fromarray(data)
+                    if channel.casefold() == 'red':
+                        blank = Image.new("L", image.size)
+                        image = Image.merge("RGB", (image, blank, blank))
+                    if channel.casefold() == 'green':
+                        blank = Image.new("L", image.size)
+                        image = Image.merge("RGB", (blank, image, blank))
+                    if channel.casefold() == 'blue':
+                        blank = Image.new("L", image.size)
+                        image = Image.merge("RGB", (blank, blank, image))
+                    return image
 
-                if channel.casefold() == 'blue':
-                    blank = Image.new("L", image.size)
-                    image = Image.merge("RGB", (blank, blank, image))
-
-                image.save(filename)
-
-                # Also export the image with axes parallel to the stage
+                # Without a scale calibration we cannot align the image
+                # to the stage's x-y axes, so the only meaningful export
+                # is the raw camera-pixel-space image - it is the sole
+                # export in that case. Otherwise, only the stage-aligned
+                # image is exported: an unaligned image's pixel
+                # coordinates don't correspond to the stage/Brillouin
+                # positions stored elsewhere in the file, so it isn't
+                # useful for overlaying with the Brillouin map.
                 if tmatrix is None:
+                    image = build_image(img_data)
+                    filename = path / \
+                        f"{channel_tag}{timing_part}_cameraPixels.png"
+                    image.save(filename)
                     continue
 
-                # Get the region of interest of the repetition
-                roi = repetition.payload.get_ROI(image_key)
-
-                if roi is None:
-                    continue
-
-                # Create an x-y grid for the image with positions in µm
-                x_pix, y_pix = np.meshgrid(
-                    np.arange(roi['width_physical']) + roi['left'],
-                    np.flip(np.arange(roi['height_physical']) + roi['bottom'])
-                )
-                x_pix = x_pix - scale_calibration['origin'][0]
-                y_pix = y_pix - scale_calibration['origin'][1]
-
-                x_mm =\
-                    x_pix * scale_calibration['pixToMicrometerX'][0] +\
-                    y_pix * scale_calibration['pixToMicrometerY'][0] +\
-                    scale_calibration['positionStage'][0]
-                y_mm =\
-                    x_pix * scale_calibration['pixToMicrometerX'][1] +\
-                    y_pix * scale_calibration['pixToMicrometerY'][1] +\
-                    scale_calibration['positionStage'][1]
-
-                # Create translation matrix to move image back to ROI
-                corners = [[0, image.size[0]-1, 0, image.size[0]-1],
-                           [0, 0, image.size[1]-1, image.size[1]-1],
-                           [1, 1, 1, 1]]
-                corners_warped = tmatrix * corners
-
-                # Necessary translation
-                dx = corners_warped[0, :].min()
-                dy = corners_warped[1, :].min()
-                # New shape
-                sx = corners_warped[0, :].max()\
-                    - corners_warped[0, :].min()
-                sy = corners_warped[1, :].max()\
-                    - corners_warped[1, :].min()
-
-                translate = np.matrix([
-                    [1, 0, -dx],
-                    [0, 1, -dy],
-                    [0, 0, 1]
-                ])
-
-                tform = transform.AffineTransform(
-                    matrix=np.linalg.inv(translate * tmatrix))
-                shape = (int(np.ceil(sy)), int(np.ceil(sx)))
-
-                # Warp the images and positions to align with a
-                # standard x-y coordinate system
-                image_data_warped = transform.warp(
-                    img_data,
-                    tform, output_shape=shape, cval=np.nan)
-                x_mm_warped = transform.warp(
-                    x_mm,
-                    tform, output_shape=shape, cval=np.nan)
-                y_mm_warped = transform.warp(
-                    y_mm,
-                    tform, output_shape=shape, cval=np.nan)
+                # Warp the image to align with a standard x-y
+                # coordinate system
+                image_data_warped, _, _ = warp_local(img_data, tmatrix)
 
                 # Export image with proper alpha channel
-                image_warped = Image.fromarray(
+                image_warped = build_image(
                     (255 * image_data_warped).astype(np.ubyte))
-                if channel.casefold() == 'red':
-                    blank = Image.new("L", image_warped.size)
-                    image_warped =\
-                        Image.merge("RGB", (image_warped, blank, blank))
-
-                if channel.casefold() == 'green':
-                    blank = Image.new("L", image_warped.size)
-                    image_warped =\
-                        Image.merge("RGB", (blank, image_warped, blank))
-
-                if channel.casefold() == 'blue':
-                    blank = Image.new("L", image_warped.size)
-                    image_warped =\
-                        Image.merge("RGB", (blank, blank, image_warped))
                 image_alpha = Image.fromarray(
                     np.nanmean(255 * np.logical_not(
                         np.isnan(image_data_warped)),
@@ -179,60 +144,5 @@ class FluorescenceExport(object):
                     .astype(np.ubyte))
                 image_warped.putalpha(image_alpha)
 
-                filename = path / f"{self.file.path.stem}" \
-                                  f"_FLrep{fluorescence_repetition}" \
-                                  f"_channel{channel}_aligned.png"
+                filename = path / f"{channel_tag}{timing_part}.png"
                 image_warped.save(filename)
-
-                # Export the images with the ROI of the Brillouin
-                # measurements
-                for brillouin_repetition in brillouin_repetitions:
-                    # Get the repetition
-                    repetition_bm = self.file.get_repetition(
-                        brillouin_repetition)
-                    # Read the Brillouin positions. A repetition from
-                    # an aborted/restarted acquisition can have no
-                    # valid positions at all.
-                    positions = repetition_bm.payload.positions
-                    if positions is None:
-                        continue
-                    x_min = np.nanmin(positions['x'])
-                    x_max = np.nanmax(positions['x'])
-                    y_min = np.nanmin(positions['y'])
-                    y_max = np.nanmax(positions['y'])
-
-                    # We are only interested in x-y-maps
-                    if not x_min < x_max or not y_min < y_max:
-                        continue
-
-                    # Find the indices delimiting the Brillouin ROI
-                    idx_mask = (x_mm_warped >= x_min) &\
-                               (x_mm_warped <= x_max) &\
-                               (y_mm_warped >= y_min) &\
-                               (y_mm_warped <= y_max)
-                    idx = np.nonzero(idx_mask)
-
-                    # Continue if the fluorescence and Brillouin ROI
-                    # don't overlap
-                    if not (idx[1].size and idx[0].size):
-                        continue
-
-                    # Crop the Fluorescence image to the Brillouin ROI
-                    image_warped_bm = image_warped.crop(
-                        (
-                            np.min(idx[1]),
-                            np.min(idx[0]),
-                            np.max(idx[1]),
-                            np.max(idx[0])
-                        )
-                    )
-
-                    # Don't fail on empty images
-                    if image_warped_bm.size == (0, 0):
-                        continue
-
-                    filename = path / f"{self.file.path.stem}" \
-                                      f"_FLrep{fluorescence_repetition}" \
-                                      f"_channel{channel}" \
-                                      f"_BMrep{brillouin_repetition}.png"
-                    image_warped_bm.save(filename)

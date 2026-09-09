@@ -2,10 +2,11 @@ import os
 import numpy as np
 import csv
 from PIL import Image
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib import cm
 from matplotlib.colors import Normalize
-from matplotlib.backends.backend_pdf import PdfPages
 
 from bmlab import Session
 
@@ -105,12 +106,18 @@ class BrillouinExport(object):
                             np.nanmin(positions[idx[1]][tuple(dslice)]), \
                             np.nanmax(positions[idx[1]][tuple(dslice)])
 
-                        # Actually plot the data
-                        fig = plt.figure()
+                        # Actually plot the data - via the object API
+                        # (not pyplot's stateful one): export can run
+                        # on a background thread (see
+                        # BMicro.export_file), and pyplot's global
+                        # figure/backend machinery isn't safe to touch
+                        # off the main thread.
+                        fig = Figure()
+                        FigureCanvasAgg(fig)
 
                         plot = fig.add_subplot(111)
 
-                        ims = plt.imshow(
+                        ims = plot.imshow(
                             image_map, interpolation='nearest',
                             extent=extent
                         )
@@ -155,13 +162,11 @@ class BrillouinExport(object):
                         # Export as PDF
                         pdf_path = path / f"{filename_base}{slice_postfix}.pdf"
                         with PdfPages(pdf_path) as pdf:
-                            pdf.savefig()
+                            pdf.savefig(fig)
 
                         # Export as PNG
                         png_path = path / f"{filename_base}{slice_postfix}.png"
-                        plt.savefig(png_path)
-
-                        plt.close(fig)
+                        fig.savefig(png_path)
 
                         # Export as bare image without axes
                         if self.file.path.parent.name == 'RawData':

@@ -46,23 +46,18 @@ def test_export_fluorescence(tmp_dir):
     session.clear()
 
     plots_dir = tmp_dir.parent / 'Plots'
+    # Fluorescence.h5 has a scale calibration and no Brillouin
+    # repetitions, so only the aligned image is exported (no camera-
+    # pixel-space raw image, no before/during/after tag).
     images = [
-        'Fluorescence_FLrep0_channelBlue.png',
-        'Fluorescence_FLrep0_channelBlue_aligned.png',
-        'Fluorescence_FLrep0_channelBrightfield.png',
-        'Fluorescence_FLrep0_channelBrightfield_aligned.png',
-        'Fluorescence_FLrep0_channelGreen.png',
-        'Fluorescence_FLrep0_channelGreen_aligned.png',
-        'Fluorescence_FLrep0_channelRed.png',
-        'Fluorescence_FLrep0_channelRed_aligned.png',
-        'Fluorescence_FLrep1_channelBlue.png',
-        'Fluorescence_FLrep1_channelBlue_aligned.png',
-        'Fluorescence_FLrep1_channelBrightfield.png',
-        'Fluorescence_FLrep1_channelBrightfield_aligned.png',
-        'Fluorescence_FLrep1_channelGreen.png',
-        'Fluorescence_FLrep1_channelGreen_aligned.png',
-        'Fluorescence_FLrep1_channelRed.png',
-        'Fluorescence_FLrep1_channelRed_aligned.png',
+        'Blue_FLrep0.png',
+        'Brightfield_FLrep0.png',
+        'Green_FLrep0.png',
+        'Red_FLrep0.png',
+        'Blue_FLrep1.png',
+        'Brightfield_FLrep1.png',
+        'Green_FLrep1.png',
+        'Red_FLrep1.png',
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
@@ -85,8 +80,7 @@ def test_export_color_images(tmp_dir):
 
     plots_dir = tmp_dir.parent / 'Plots'
     images = [
-        'ColorImage_FLrep0_channelbrightfield.png',
-        'ColorImage_FLrep0_channelbrightfield_aligned.png',
+        'Brightfield_FLrep0.png',
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
@@ -110,8 +104,7 @@ def test_export_color_images_plane(tmp_dir):
 
     plots_dir = tmp_dir.parent / 'Plots'
     images = [
-        'ColorImagePlane_FLrep0_channelbrightfield.png',
-        'ColorImagePlane_FLrep0_channelbrightfield_aligned.png',
+        'Brightfield_FLrep0.png',
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
@@ -133,35 +126,23 @@ def test_export_fluorescence_combined(tmp_dir):
     session.clear()
 
     plots_dir = tmp_dir.parent / 'Plots' / 'Bare'
+    # Fluorescence.h5 has a scale calibration and no Brillouin
+    # repetitions, so only the stage-aligned combination is exported.
     images = [
-        'Fluorescence_FLrep0_fluorescenceCombined___b.png',
-        'Fluorescence_FLrep0_fluorescenceCombined___b_aligned.png',
-        'Fluorescence_FLrep0_fluorescenceCombined__g_.png',
-        'Fluorescence_FLrep0_fluorescenceCombined__g__aligned.png',
-        'Fluorescence_FLrep0_fluorescenceCombined__gb.png',
-        'Fluorescence_FLrep0_fluorescenceCombined__gb_aligned.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_r__.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_r___aligned.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_r_b.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_r_b_aligned.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_rg_.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_rg__aligned.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_rgb.png',
-        'Fluorescence_FLrep0_fluorescenceCombined_rgb_aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined___b.png',
-        'Fluorescence_FLrep1_fluorescenceCombined___b_aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined__g_.png',
-        'Fluorescence_FLrep1_fluorescenceCombined__g__aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined__gb.png',
-        'Fluorescence_FLrep1_fluorescenceCombined__gb_aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_r__.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_r___aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_r_b.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_r_b_aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_rg_.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_rg__aligned.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_rgb.png',
-        'Fluorescence_FLrep1_fluorescenceCombined_rgb_aligned.png',
+        'fluorescenceCombined___b_FLrep0.png',
+        'fluorescenceCombined__g__FLrep0.png',
+        'fluorescenceCombined__gb_FLrep0.png',
+        'fluorescenceCombined_r___FLrep0.png',
+        'fluorescenceCombined_r_b_FLrep0.png',
+        'fluorescenceCombined_rg__FLrep0.png',
+        'fluorescenceCombined_rgb_FLrep0.png',
+        'fluorescenceCombined___b_FLrep1.png',
+        'fluorescenceCombined__g__FLrep1.png',
+        'fluorescenceCombined__gb_FLrep1.png',
+        'fluorescenceCombined_r___FLrep1.png',
+        'fluorescenceCombined_r_b_FLrep1.png',
+        'fluorescenceCombined_rg__FLrep1.png',
+        'fluorescenceCombined_rgb_FLrep1.png',
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
@@ -232,19 +213,37 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
 
     plots_dir = tmp_dir.parent / 'Plots'
     images = [
-        'SurfaceScan_BMrep0_surface_found_mask.png',
-        'SurfaceScan_BMrep0_surface_roi_plan_mask.png',
-        'SurfaceScan_BMrep0_surface_sampled_mask.png',
-        'SurfaceScan_FLrep0_overviewBrightfield_000.png',
-        'SurfaceScan_FLrep0_overviewBrightfield_001.png',
-        'SurfaceScan_FLrep0_overviewBrightfield_002.png',
-        'SurfaceScan_FLrep0_overviewBrightfield_003.png',
+        'surface_BMrep0_z_surface.png',
+        'surface_BMrep0_3d.png',
+        'surface_BMrep0_roi_plan_mask.png',
+        # SurfaceScan.h5's overview images were captured after
+        # Brillouin repetition 0 finished, with 2 z-planes x 2 tiles
+        # each (point_count=2, point_stack_counts=[1, 1]) - no FLrep
+        # in the name (only one overview stack is ever written per
+        # Brillouin repetition), one file per z-plane since each
+        # plane's own tiles don't belong in one combined stack with
+        # another plane's, and each is a tiled mosaic since it has
+        # more than one distinct tile position.
+        'overviewZStack_0_BMrep0_afterAcq_tiled.tif',
+        'overviewZStack_1_BMrep0_afterAcq_tiled.tif',
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
 
+    # SurfaceScan.h5 predates the coarse pre-scan point datasets
+    # (positions-surface-prescan-x/y-um etc.) - no plot should be
+    # produced for data that was never saved.
+    assert not os.path.exists(
+        plots_dir / 'surface_BMrep0_prescan_points.png')
+
+    # SurfaceScan.h5 has no drawn ROI polygon saved - only its
+    # grid-rasterized 'roi_scan_plan_mask' - so no polygon plot is
+    # produced for it.
+    assert not os.path.exists(
+        plots_dir / 'surface_BMrep0_roi_polygon.png')
+
     export_dir = tmp_dir.parent / 'Export'
-    metrics_file = export_dir / 'SurfaceScan_BMrep0_surface_metrics.json'
+    metrics_file = export_dir / 'surface_BMrep0_metrics.json'
     assert os.path.exists(metrics_file)
 
     with open(metrics_file) as f:
@@ -252,6 +251,15 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
     assert metrics['surface_found_fraction'] == pytest.approx(0.5)
     assert metrics['surface_interpolated_fraction'] == pytest.approx(1 / 3)
     assert metrics['surface_missing_fraction'] == pytest.approx(1 / 6)
+    assert metrics['surface_used_fraction'] == pytest.approx(0.5 + 1 / 3)
+    # Restricted to the drawn ROI (5 of the 6 grid points), the point
+    # with no surface info at all happens to sit outside the ROI, so
+    # roi_surface_missing_fraction is 0 even though the unrestricted
+    # surface_missing_fraction above is 1/6.
+    assert metrics['roi_surface_found_fraction'] == pytest.approx(0.6)
+    assert metrics['roi_surface_interpolated_fraction'] == pytest.approx(0.4)
+    assert metrics['roi_surface_missing_fraction'] == pytest.approx(0.0)
+    assert metrics['roi_surface_used_fraction'] == pytest.approx(1.0)
     assert metrics['roi_coverage_fraction'] == pytest.approx(0.8)
     assert metrics['surface_follow_used'] == 1
     assert metrics['surface_z_offset_um_used'] == pytest.approx(2.5)
@@ -259,14 +267,12 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
 
 def test_export_fluorescence_with_aborted_brillouin_repetition(tmp_dir):
     """
-    Regression test: FluorescenceExport/FluorescenceCombinedExport crop
-    each fluorescence image to every Brillouin repetition's ROI, but
-    didn't check whether that repetition actually has valid positions.
-    SurfaceScan.h5's Brillouin repetition '1' is aborted/restarted
+    Regression test: exports that relate a Fluorescence repetition to
+    a Brillouin one (via bmlab.export.timing.get_brillouin_windows)
+    must not crash when a Brillouin repetition is aborted/restarted.
+    SurfaceScan.h5's Brillouin repetition '1' is exactly that case
     (resolution attributes set, but no positions-x/y/z datasets or
-    images at all) - exporting fluorescence data must skip it
-    gracefully instead of crashing with
-    "TypeError: 'NoneType' object is not subscriptable".
+    images at all) - it must be skipped gracefully instead of raising.
     """
     shutil.copy(
         data_file_path('SurfaceScan.h5'), Path.cwd() / 'SurfaceScan.h5')
@@ -279,7 +285,6 @@ def test_export_fluorescence_with_aborted_brillouin_repetition(tmp_dir):
     config = ec.get_configuration()
     config['brillouin']['export'] = False
     config['surface']['export'] = False
-    config['overviewBrightfield']['export'] = False
     # Must not raise
     ec.export(config)
 

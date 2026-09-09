@@ -572,8 +572,7 @@ class EvaluationController(ImageController):
             for region_key, region in enumerate(rayleigh_regions,):
                 results = self.fit_spectra(spectra, frequencies, region)
                 for frame_num, _ in enumerate(spectra):
-                    ind = (ind_x, ind_y, ind_z, frame_num,
-                           region_key - len(brillouin_regions))
+                    ind = (ind_x, ind_y, ind_z, frame_num, region_key)
                     evm.results['rayleigh_peak_position_f'][ind] =\
                         results[frame_num][0]
                     evm.results['rayleigh_peak_fwhm_f'][ind] =\

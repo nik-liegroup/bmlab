@@ -13,6 +13,7 @@ from bmlab.file import BrillouinFile, is_source_file, is_session_file, \
     FLUORESCENCE_GROUP, OVERVIEW_BRIGHTFIELD_CHANNEL
 from bmlab.models.extraction_model import ExtractionModel
 from bmlab.models.orientation import Orientation
+from bmlab.models.crop import Crop
 from bmlab.models.setup import AVAILABLE_SETUPS
 from bmlab.models.calibration_model import CalibrationModel
 from bmlab.models.peak_selection_model import PeakSelectionModel
@@ -173,7 +174,7 @@ class Session(Serializer):
             imgs = payload.get_image(image_keys[0])
             if imgs is None:
                 continue
-            img = self.orientation.apply(imgs[0, ...])
+            img = self.crop.apply(self.orientation.apply(imgs[0, ...]))
             self.extraction_models.get(repetition).set_image_shape(img.shape)
 
     def set_arc_width(self):
@@ -275,7 +276,7 @@ class Session(Serializer):
         imgs = self.current_repetition().calibration.get_image(calib_key)
         if frame_num is not None:
             imgs = imgs[frame_num, ...]
-        return self.orientation.apply(imgs)
+        return self.crop.apply(self.orientation.apply(imgs))
 
     def get_calibration_image_count(self, calib_key):
         return self.current_repetition()\
@@ -316,7 +317,7 @@ class Session(Serializer):
             return None
         if frame_num is not None:
             imgs = imgs[frame_num, ...]
-        return self.orientation.apply(imgs)
+        return self.crop.apply(self.orientation.apply(imgs))
 
     def get_payload_image_count(self, calib_key):
         return self.current_repetition().payload.get_image_count(calib_key)
@@ -361,17 +362,53 @@ class Session(Serializer):
 
     def current_fluorescence_repetition(self):
         """
-        Returns the Fluorescence-mode repetition matching the
-        currently selected Brillouin repetition (by key), or None
-        if the file has no such Fluorescence repetition.
+        Returns the Fluorescence-mode repetition captured *during*
+        the currently selected Brillouin repetition's own measurement
+        (by acquisition timing - see
+        bmlab.export.timing.classify_timing()), or None if there is
+        none.
+
+        This is NOT necessarily the Fluorescence repetition sharing
+        the same repetition key: BrillouinAcquisition starts a new
+        Fluorescence repetition alongside a Brillouin one specifically
+        for its brightfield-overview images
+        (saveOverviewBrightfieldPerZ), but Fluorescence's own
+        repetition counter also advances for every standalone
+        Fluorescence capture triggered independently (e.g. a single
+        "before"/"after" snapshot) - so on a file with both kinds of
+        capture, the two counters drift apart and a same-key lookup
+        can silently return an unrelated Fluorescence repetition
+        instead. Falls back to the same-key repetition if timing
+        classification finds nothing (e.g. no Brillouin measurement
+        has any images yet to classify against), for graceful
+        degradation rather than always returning None.
         """
         if self.file is None or self._current_repetition_key is None:
             return None
-        if self._current_repetition_key not in \
+        # Local import: bmlab.export imports bmlab.session's own
+        # Session class at module load time (see e.g.
+        # fluorescence_export.py), so a module-level import here
+        # would be circular.
+        from bmlab.export.timing import get_brillouin_windows, \
+            classify_timing
+        brillouin_windows = get_brillouin_windows(self.file)
+        for fl_key in self.file.repetition_keys(FLUORESCENCE_GROUP):
+            fl_rep = self.file.get_repetition(fl_key, FLUORESCENCE_GROUP)
+            image_keys = fl_rep.payload.image_keys(sort_by_time=True)
+            if not image_keys:
+                continue
+            start = fl_rep.payload.get_date(image_keys[0])
+            end = fl_rep.payload.get_date(image_keys[-1])
+            timing = classify_timing(start, end, brillouin_windows)
+            if timing is not None \
+                    and timing[0] == self._current_repetition_key \
+                    and timing[1] == 'during':
+                return fl_rep
+        if self._current_repetition_key in \
                 self.file.repetition_keys(FLUORESCENCE_GROUP):
-            return None
-        return self.file.get_repetition(
-            self._current_repetition_key, FLUORESCENCE_GROUP)
+            return self.file.get_repetition(
+                self._current_repetition_key, FLUORESCENCE_GROUP)
+        return None
 
     def has_surface_scan(self):
         rep = self.current_repetition()
@@ -411,6 +448,18 @@ class Session(Serializer):
             imgs = imgs[frame_num, ...]
         return self.orientation.apply(imgs)
 
+    def get_fluorescence_position(self, image_key):
+        rep = self.current_fluorescence_repetition()
+        if rep is None:
+            return None
+        return rep.payload.get_position(image_key)
+
+    def get_fluorescence_stage_position(self, image_key):
+        rep = self.current_fluorescence_repetition()
+        if rep is None:
+            return None
+        return rep.payload.get_stage_position(image_key)
+
     def clear(self):
         """
         Close connection to loaded file.
@@ -424,6 +473,7 @@ class Session(Serializer):
             self.file = None
 
         self.orientation = Orientation()
+        self.crop = Crop()
         self.setup = None
 
         # Session data by repetition:
@@ -444,6 +494,26 @@ class Session(Serializer):
     def set_reflection(self, **kwargs):
         self.orientation.set_reflection(**kwargs)
         self.set_image_shape()
+
+    def set_crop_bounds(self, bounds):
+        """
+        Restricts every calibration/payload image read from the file to
+        the given (x_min, x_max, y_min, y_max) pixel bounds (in the same
+        array-index convention as extraction points, i.e. img[x, y]).
+
+        Like set_rotation()/set_reflection(), this does not shift or
+        clear any already-placed extraction points - draw the crop before
+        placing points for a calibration, or re-place them afterwards.
+        """
+        self.crop.set_bounds(bounds)
+        self.set_image_shape()
+
+    def clear_crop(self):
+        self.crop.clear()
+        self.set_image_shape()
+
+    def get_crop_bounds(self):
+        return self.crop.bounds
 
     def save(self):
         if self.file is None:

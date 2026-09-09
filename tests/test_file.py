@@ -2,7 +2,10 @@ import pytest
 import pathlib
 import datetime
 
-from bmlab.file import BrillouinFile, \
+import h5py
+import numpy as np
+
+from bmlab.file import BrillouinFile, Payload, \
     BadFileException, is_source_file, is_session_file
 
 
@@ -258,6 +261,92 @@ def test_file_has_no_surface_scan_data_by_default():
     assert rep.payload.get_overview_brightfield_positions() is None
 
 
+def test_file_reconstructs_surface_follow_z_from_sampled_path(tmp_path):
+    # Older BrillouinAcquisition versions wrote positions-z as a flat
+    # nominal grid (same z for every x, y at a given z-index), discarding
+    # the real per-(x, y) surface-following offset - even though that real
+    # offset is separately available, in acquisition order, in
+    # positions-sampled-x/y/z. Payload should reconstruct the true z from
+    # that path rather than exposing the flat nominal grid.
+    nx, ny, nz = 2, 2, 3
+    x_grid = np.array([0.0, 10.0])
+    y_grid = np.array([0.0, 10.0])
+    # Deliberately different from any sampled z, so a leftover nominal
+    # value is easy to tell apart from a reconstructed one.
+    nominal_z = np.array([100.0, 200.0, 300.0])
+
+    # Per-(x, y) column real z, out of ascending z-index order on purpose
+    # (acquisition order isn't sorted-by-z-index) - reconstruction sorts
+    # within each column, so this must not matter.
+    columns = {
+        (0.0, 0.0): [1.5, 0.5, 2.5],
+        (0.0, 10.0): [2.0, 3.0, 1.0],
+        (10.0, 0.0): [0.5, -0.5, 1.5],
+        (10.0, 10.0): [1.0, 2.0, 0.0],
+    }
+    sampled_x, sampled_y, sampled_z = [], [], []
+    for (cx, cy), zs in columns.items():
+        for z in zs:
+            sampled_x.append(cx)
+            sampled_y.append(cy)
+            sampled_z.append(z)
+
+    def populate(group):
+        group.attrs['resolution-x'] = [nx]
+        group.attrs['resolution-y'] = [ny]
+        group.attrs['resolution-z'] = [nz]
+
+        pos_x = np.tile(x_grid.reshape(1, nx, 1), (nz, 1, ny))
+        pos_y = np.tile(y_grid.reshape(1, 1, ny), (nz, nx, 1))
+        pos_z = np.tile(nominal_z.reshape(nz, 1, 1), (1, nx, ny))
+        group.create_dataset('positions-x', data=pos_x)
+        group.create_dataset('positions-y', data=pos_y)
+        group.create_dataset('positions-z', data=pos_z)
+
+        group.create_dataset('positions-sampled-x', data=sampled_x)
+        group.create_dataset('positions-sampled-y', data=sampled_y)
+        group.create_dataset('positions-sampled-z', data=sampled_z)
+
+    payload = _make_payload(
+        tmp_path, 'surface_follow_z.h5', populate)
+
+    for ix, cx in enumerate(x_grid):
+        for iy, cy in enumerate(y_grid):
+            expected = np.sort(columns[(cx, cy)])
+            actual = payload.positions['z'][:, ix, iy]
+            np.testing.assert_array_equal(actual, expected)
+    # None of the reconstructed values should be the old flat nominal.
+    assert not np.any(np.isin(payload.positions['z'], nominal_z))
+
+
+def test_file_falls_back_to_nominal_z_without_sampled_path(tmp_path):
+    # Files old enough not to have positions-sampled-* at all (or a
+    # column with no matching sampled point) should keep the nominal
+    # positions-z untouched rather than erroring.
+    nx, ny, nz = 2, 2, 3
+    x_grid = np.array([0.0, 10.0])
+    y_grid = np.array([0.0, 10.0])
+    nominal_z = np.array([100.0, 200.0, 300.0])
+
+    def populate(group):
+        group.attrs['resolution-x'] = [nx]
+        group.attrs['resolution-y'] = [ny]
+        group.attrs['resolution-z'] = [nz]
+        pos_x = np.tile(x_grid.reshape(1, nx, 1), (nz, 1, ny))
+        pos_y = np.tile(y_grid.reshape(1, 1, ny), (nz, nx, 1))
+        pos_z = np.tile(nominal_z.reshape(nz, 1, 1), (1, nx, ny))
+        group.create_dataset('positions-x', data=pos_x)
+        group.create_dataset('positions-y', data=pos_y)
+        group.create_dataset('positions-z', data=pos_z)
+
+    payload = _make_payload(tmp_path, 'no_sampled_path.h5', populate)
+
+    for ix in range(nx):
+        for iy in range(ny):
+            np.testing.assert_array_equal(
+                payload.positions['z'][:, ix, iy], nominal_z)
+
+
 def test_file_get_surface_scan_data():
     bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
     rep = bf.get_repetition('0')
@@ -290,6 +379,129 @@ def test_file_get_overview_brightfield_positions():
     assert positions['x'].shape == (2, 2)
     assert positions['y'].shape == (2, 2)
     assert positions['z'].shape == (2, 2)
+
+
+def _make_payload(tmp_path, name, populate):
+    """
+    Creates a standalone HDF5 payload group (not a full BrillouinFile) in
+    a temp file and wraps it in a Payload, for exercising Payload logic
+    against synthetic datasets/attributes without needing a full
+    BrillouinAcquisition-generated fixture file.
+    """
+    h5 = h5py.File(tmp_path / name, 'w')
+    group = h5.create_group('payload')
+    populate(group)
+    return Payload(group, None)
+
+
+def test_file_get_overview_brightfield_positions_point_count_uniform(
+        tmp_path):
+    # New-format file: point-count/point-stack-counts with a uniform
+    # stack depth of 1 per point (2 points per z-slice, 2 z-slices).
+    def populate(group):
+        group.create_dataset(
+            'positions-overview-brightfield-x', data=np.arange(4.))
+        group.create_dataset(
+            'positions-overview-brightfield-y', data=np.arange(4.))
+        group.create_dataset(
+            'positions-overview-brightfield-z', data=np.arange(4.))
+        group.create_dataset(
+            'positions-overview-brightfield-point-count', data=[2])
+        group.create_dataset(
+            'positions-overview-brightfield-point-stack-counts',
+            data=[1, 1])
+
+    payload = _make_payload(tmp_path, 'uniform.h5', populate)
+    assert payload.has_overview_brightfield()
+
+    positions = payload.get_overview_brightfield_positions()
+    assert positions['point_count'] == 2
+    assert list(positions['point_stack_counts']) == [1, 1]
+    assert positions['tile_count'] == 2
+    assert positions['x'].shape == (2, 2)
+
+
+def test_file_get_overview_brightfield_positions_non_uniform_stack(
+        tmp_path):
+    # New-format file with a non-uniform per-point stack depth: one
+    # point kept its full z-stack (depth 3), the other is a single
+    # image (depth 1) -> total_per_z = 4, over 2 z-slices = 8 values.
+    def populate(group):
+        group.create_dataset(
+            'positions-overview-brightfield-x', data=np.arange(8.))
+        group.create_dataset(
+            'positions-overview-brightfield-y', data=np.arange(8.))
+        group.create_dataset(
+            'positions-overview-brightfield-z', data=np.arange(8.))
+        group.create_dataset(
+            'positions-overview-brightfield-point-count', data=[2])
+        group.create_dataset(
+            'positions-overview-brightfield-point-stack-counts',
+            data=[1, 3])
+
+    payload = _make_payload(tmp_path, 'nonuniform.h5', populate)
+
+    positions = payload.get_overview_brightfield_positions()
+    assert positions['point_count'] == 2
+    assert list(positions['point_stack_counts']) == [1, 3]
+    # total_per_z = 1 + 3 = 4, reshaped over 2 z-slices
+    assert positions['tile_count'] == 4
+    assert positions['x'].shape == (2, 4)
+
+
+def test_file_get_overview_brightfield_positions_old_format_fallback(
+        tmp_path):
+    # Files from before the point-count/point-stack-counts update only
+    # wrote a single tile-count (implying a stack depth of 1 per tile).
+    def populate(group):
+        group.create_dataset(
+            'positions-overview-brightfield-x', data=np.arange(4.))
+        group.create_dataset(
+            'positions-overview-brightfield-y', data=np.arange(4.))
+        group.create_dataset(
+            'positions-overview-brightfield-z', data=np.arange(4.))
+        group.create_dataset(
+            'positions-overview-brightfield-tile-count', data=[2])
+
+    payload = _make_payload(tmp_path, 'oldformat.h5', populate)
+
+    positions = payload.get_overview_brightfield_positions()
+    assert positions['point_count'] == 2
+    assert list(positions['point_stack_counts']) == [1, 1]
+    assert positions['tile_count'] == 2
+    assert positions['x'].shape == (2, 2)
+
+
+def test_file_get_position_and_stage_position(tmp_path):
+    def populate(group):
+        data = group.create_group('data')
+        with_both = data.create_dataset('0', data=np.zeros((1, 2, 2)))
+        with_both.attrs['position_x_um'] = [1.0]
+        with_both.attrs['position_y_um'] = [2.0]
+        with_both.attrs['position_z_um'] = [3.0]
+        with_both.attrs['stage_position_x_um'] = [1.1]
+        with_both.attrs['stage_position_y_um'] = [2.1]
+        with_both.attrs['stage_position_z_um'] = [3.1]
+
+        target_only = data.create_dataset('1', data=np.zeros((1, 2, 2)))
+        target_only.attrs['position_x_um'] = [4.0]
+        target_only.attrs['position_y_um'] = [5.0]
+        target_only.attrs['position_z_um'] = [6.0]
+
+        no_position = data.create_dataset('2', data=np.zeros((1, 2, 2)))
+        del no_position  # no position attrs at all
+
+    payload = _make_payload(tmp_path, 'positions.h5', populate)
+
+    assert payload.get_position('0') == {'x': 1.0, 'y': 2.0, 'z': 3.0}
+    assert payload.get_stage_position('0') == \
+        {'x': 1.1, 'y': 2.1, 'z': 3.1}
+
+    assert payload.get_position('1') == {'x': 4.0, 'y': 5.0, 'z': 6.0}
+    assert payload.get_stage_position('1') is None
+
+    assert payload.get_position('2') is None
+    assert payload.get_stage_position('2') is None
 
 
 def test_file_get_overview_brightfield_images():
