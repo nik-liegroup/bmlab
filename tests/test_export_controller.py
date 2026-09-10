@@ -162,35 +162,13 @@ def test_export_brillouin_2D(tmp_dir):
     config = ec.get_configuration()
     config['fluorescence']['export'] = False
     config['fluorescenceCombined']['export'] = False
-    config['brillouin']['parameters'] =\
-        ['brillouin_shift_f', 'brillouin_peak_intensity']
     ec.export(config)
 
     session.clear()
 
-    plots_dir = tmp_dir.parent / 'Plots' / 'Bare'
-    images = [
-        '2D-xy_BMrep0_brillouin_shift_f.png',
-        '2D-xy_BMrep0_brillouin_shift_f.tiff',
-        '2D-xy_BMrep0_brillouin_peak_intensity.png',
-        '2D-xy_BMrep0_brillouin_peak_intensity.tiff',
-    ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
-
-    plots_dir = tmp_dir.parent / 'Plots' / 'WithAxis'
-    images = [
-        '2D-xy_BMrep0_brillouin_shift_f.pdf',
-        '2D-xy_BMrep0_brillouin_shift_f.png',
-        '2D-xy_BMrep0_brillouin_peak_intensity.pdf',
-        '2D-xy_BMrep0_brillouin_peak_intensity.png',
-    ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
-
-    # One combined CSV per repetition (all evaluated quantities, not
-    # just the ones selected for plotting above) replaces the old
-    # one-file-per-parameter layout.
+    # One combined CSV per repetition (every evaluated quantity) is
+    # the only Brillouin export output now - no more per-parameter
+    # Plots/Bare and Plots/WithAxis image files.
     assert os.path.exists(
         tmp_dir.parent / 'Export' / '2D-xy_BMrep0_data.csv')
 
@@ -543,42 +521,12 @@ def test_export_brillouin_3D(tmp_dir):
     config = ec.get_configuration()
     config['fluorescence']['export'] = False
     config['fluorescenceCombined']['export'] = False
-    config['brillouin']['parameters'] =\
-        ['brillouin_shift_f', 'brillouin_peak_intensity']
     ec.export(config)
 
     session.clear()
 
-    slice_count = 3
-
-    plots_dir = tmp_dir.parent / 'Plots' / 'Bare'
-    images = [
-        '3D_BMrep0_brillouin_shift_f',
-        '3D_BMrep0_brillouin_peak_intensity',
-    ]
-    for image in images:
-        # Check that slices are exported as separate PNGs
-        for slice_number in range(slice_count):
-            assert os.path.exists(
-                plots_dir / f'{image}_slice-{slice_number}.png')
-        # Check that slices are exported as single stacked TIFF
-        assert os.path.exists(
-            plots_dir / f'{image}.tiff')
-
-    plots_dir = tmp_dir.parent / 'Plots' / 'WithAxis'
-    images = [
-        '3D_BMrep0_brillouin_shift_f',
-        '3D_BMrep0_brillouin_peak_intensity',
-    ]
-    file_types = ['pdf', 'png']
-    for image in images:
-        for file_type in file_types:
-            for slice_number in range(slice_count):
-                assert os.path.exists(
-                    plots_dir / f'{image}_slice-{slice_number}.{file_type}')
-
-    # One combined CSV per repetition (all evaluated quantities, not
-    # just the ones selected for plotting above) replaces the old
-    # one-file-per-parameter-per-slice layout.
+    # One combined CSV per repetition (every evaluated quantity) is
+    # the only Brillouin export output now - no more per-parameter,
+    # per-slice Plots/Bare and Plots/WithAxis image files.
     assert os.path.exists(
         tmp_dir.parent / 'Export' / '3D_BMrep0_data.csv')

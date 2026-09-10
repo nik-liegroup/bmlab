@@ -1269,14 +1269,10 @@ class ExportController(object):
             },
             'brillouin': {
                 'export': True,
-                'parameters': ['brillouin_shift_f'],
                 # Which Brillouin repetition keys (e.g. '0', '1', ...)
                 # to export - None means "all of them" (every caller
                 # other than BMicro's export dialog leaves this alone).
                 'repetitions': None,
-                'brillouin_shift_f': {
-                    'cax': ('min', 'max'),
-                }
             },
             'surface': {
                 'export': True,

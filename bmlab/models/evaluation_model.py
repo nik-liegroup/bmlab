@@ -323,15 +323,14 @@ class EvaluationModel(Serializer):
         near-empty gap, then a distinct population of clear fit
         failures from 1.7-2.9 GHz - and 0.2 GHz sits right in that
         gap. rayleigh_shift_frame_spread mirrors it, since it's the
-        same reproducibility check on the other peak. The SNR/NRMSE
-        defaults (amplitude >= noise SD; residual <= peak amplitude)
-        are physically-reasoned starting points, not yet checked
-        against real data the same way. No default is set for
-        center_uncertainty or brillouin_peak_fwhm_f - the former
-        because its natural scale wasn't established this way either,
-        the latter because FWHM can carry real biological information
-        and isn't recommended as a primary filter (see the Brillouin
-        peak fitting discussion this was designed around).
+        same reproducibility check on the other peak. SNR >= 5 and
+        center_uncertainty <= 0.08 GHz are user-set starting points.
+        NRMSE's default (residual <= peak amplitude) is a physically-
+        reasoned starting point, not yet checked against real data the
+        same way. No default is set for brillouin_peak_fwhm_f - FWHM
+        can carry real biological information and isn't recommended as
+        a primary filter (see the Brillouin peak fitting discussion
+        this was designed around).
         """
         return {
             'brillouin_shift_frame_spread': {
@@ -339,13 +338,17 @@ class EvaluationModel(Serializer):
             'rayleigh_shift_frame_spread': {
                 'enabled': True, 'min': None, 'max': 0.2},
             'brillouin_peak_snr': {
-                'enabled': True, 'min': 1.0, 'max': None},
+                'enabled': True, 'min': 5.0, 'max': None},
             'rayleigh_peak_snr': {
-                'enabled': True, 'min': 1.0, 'max': None},
+                'enabled': True, 'min': 5.0, 'max': None},
             'brillouin_peak_nrmse': {
                 'enabled': True, 'min': None, 'max': 1.0},
             'rayleigh_peak_nrmse': {
                 'enabled': True, 'min': None, 'max': 1.0},
+            'brillouin_peak_center_uncertainty': {
+                'enabled': True, 'min': None, 'max': 0.08},
+            'rayleigh_peak_center_uncertainty': {
+                'enabled': True, 'min': None, 'max': 0.08},
         }
 
     def initialize_results_arrays(self, dims):
