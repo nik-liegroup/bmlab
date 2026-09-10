@@ -367,7 +367,7 @@ class CalibrationController(ImageController):
         for frame_num, spectrum in enumerate(spectra):
             for region_key, region in enumerate(regions):
                 xdata = np.arange(len(spectrum))
-                w0, fwhm, intensity, offset = \
+                w0, fwhm, intensity, offset, *_ = \
                     fit_lorentz_region(region, xdata, spectrum)
                 cm.add_rayleigh_fit(calib_key, region_key, frame_num,
                                     w0, fwhm, intensity, offset)
@@ -384,7 +384,7 @@ class CalibrationController(ImageController):
         for frame_num, spectrum in enumerate(spectra):
             for region_key, region in enumerate(regions):
                 xdata = np.arange(len(spectrum))
-                w0s, fwhms, intensities, offset = \
+                w0s, fwhms, intensities, offset, *_ = \
                     fit_lorentz_region(
                         region,
                         xdata,
@@ -568,6 +568,13 @@ class EvaluationController(ImageController):
                         results[frame_num][2]
                     evm.results['brillouin_peak_offset'][ind] =\
                         results[frame_num][3]
+                    evm.results['brillouin_peak_snr'][ind] =\
+                        results[frame_num][4]
+                    evm.results['brillouin_peak_nrmse'][ind] =\
+                        results[frame_num][5]
+                    evm.results[
+                        'brillouin_peak_center_uncertainty'][ind] =\
+                        results[frame_num][6]
 
             for region_key, region in enumerate(rayleigh_regions,):
                 results = self.fit_spectra(spectra, frequencies, region)
@@ -581,6 +588,13 @@ class EvaluationController(ImageController):
                         results[frame_num][2]
                     evm.results['rayleigh_peak_offset'][ind] =\
                         results[frame_num][3]
+                    evm.results['rayleigh_peak_snr'][ind] =\
+                        results[frame_num][4]
+                    evm.results['rayleigh_peak_nrmse'][ind] =\
+                        results[frame_num][5]
+                    evm.results[
+                        'rayleigh_peak_center_uncertainty'][ind] =\
+                        results[frame_num][6]
 
             # We can only do a multi-peak fit after the single-peak
             # Rayleigh fit is done, because we have to know the
@@ -627,6 +641,15 @@ class EvaluationController(ImageController):
                         evm.results[
                             'brillouin_peak_offset'][ind] = \
                             results_multi_peak[frame_num][3]
+                        evm.results[
+                            'brillouin_peak_snr'][ind] = \
+                            results_multi_peak[frame_num][4]
+                        evm.results[
+                            'brillouin_peak_nrmse'][ind] = \
+                            results_multi_peak[frame_num][5]
+                        evm.results[
+                            'brillouin_peak_center_uncertainty'][ind] = \
+                            results_multi_peak[frame_num][6]
 
             # Calculate the shift of the Rayleigh peaks,
             # in order to follow the peaks in case of a drift
@@ -934,6 +957,147 @@ class EvaluationController(ImageController):
 
         return data, positions, dimensionality, labels
 
+    # Parameter keys meaningful as a quality filter - see
+    # EvaluationModel.get_default_parameters() for what each measures.
+    QUALITY_METRIC_KEYS = [
+        'brillouin_peak_snr',
+        'brillouin_peak_center_uncertainty',
+        'brillouin_shift_frame_spread',
+        'rayleigh_peak_snr',
+        'rayleigh_peak_center_uncertainty',
+        'rayleigh_shift_frame_spread',
+        'brillouin_peak_nrmse',
+        'rayleigh_peak_nrmse',
+        'brillouin_peak_fwhm_f',
+    ]
+
+    # Sentinel default for set_quality_threshold()'s keyword arguments,
+    # distinct from None: None is a legitimate value there (clear that
+    # bound entirely), so "not passed - leave this field as it was"
+    # needs its own marker instead of overloading None for both.
+    _UNSET = object()
+
+    def set_quality_threshold(self, metric_key, enabled=_UNSET,
+                              min_value=_UNSET, max_value=_UNSET):
+        """
+        Updates the stored threshold for one quality metric (a key in
+        QUALITY_METRIC_KEYS), creating it if not already set. Pass
+        only the fields that changed - an omitted field keeps its
+        previous value (defaults for a new entry: enabled=True,
+        min_value=None i.e. no lower bound, max_value=None i.e. no
+        upper bound); an explicit min_value=None/max_value=None clears
+        that bound. Values are in the same display units get_data()
+        returns (e.g. GHz), matching what a threshold slider would
+        show.
+        """
+        evm = self.session.evaluation_model()
+        if not evm:
+            return
+        current = evm.quality_thresholds.get(
+            metric_key, {'enabled': True, 'min': None, 'max': None})
+        if enabled is not self._UNSET:
+            current['enabled'] = enabled
+        if min_value is not self._UNSET:
+            current['min'] = min_value
+        if max_value is not self._UNSET:
+            current['max'] = max_value
+        evm.quality_thresholds[metric_key] = current
+
+    def compute_quality_mask(self):
+        """
+        Evaluates every enabled quality threshold (see
+        set_quality_threshold()) against the current evaluation
+        results and combines them with AND.
+
+        Returns
+        -------
+        mask: np.ndarray of bool, shape (dim_x, dim_y, dim_z), or None
+            True where the point passes every enabled threshold. None
+            if there's no valid measurement grid.
+        measured: np.ndarray of bool, same shape, or None
+            True where the point was actually measured (has a 'time'
+            value) - an unmeasured point is never counted as passing
+            or failing a quality check, since there was nothing to
+            check.
+        """
+        evm = self.session.evaluation_model()
+        if not evm:
+            return None, None
+
+        time_data, _, _, _ = self.get_data('time', 0)
+        if time_data is None:
+            return None, None
+        measured = ~np.isnan(time_data)
+
+        mask = measured.copy()
+        for metric_key, threshold in evm.quality_thresholds.items():
+            if not threshold.get('enabled', True):
+                continue
+            if threshold.get('min') is None \
+                    and threshold.get('max') is None:
+                continue
+            data, _, _, _ = self.get_data(metric_key, 0)
+            metric_mask = np.ones(mask.shape, dtype=bool)
+            if threshold.get('min') is not None:
+                metric_mask &= (data >= threshold['min'])
+            if threshold.get('max') is not None:
+                metric_mask &= (data <= threshold['max'])
+            mask &= metric_mask
+
+        return mask, measured
+
+    def apply_quality_thresholds(self):
+        """
+        Computes compute_quality_mask() and stores it as
+        evm.results['quality_pass'] (1.0 where a measured point passes
+        every enabled threshold, 0.0 where it fails one, NaN where the
+        point was never measured) - so it flows through get_data(),
+        the standard plots, and BrillouinExport's combined CSV exactly
+        like any other parameter, without touching any other result.
+        """
+        evm = self.session.evaluation_model()
+        if not evm:
+            return
+        mask, measured = self.compute_quality_mask()
+        if mask is None:
+            return
+        quality_pass = np.full(mask.shape, np.nan)
+        quality_pass[measured] = mask[measured].astype(float)
+        # quality_pass has no frame/region/peak axes of its own (it's
+        # already a per-point pass/fail) - broadcast to the standard
+        # 6D results shape so it flows through get_data() like every
+        # other parameter.
+        shape = evm.results['time'].shape
+        evm.results['quality_pass'] = np.broadcast_to(
+            quality_pass[:, :, :, np.newaxis, np.newaxis, np.newaxis],
+            shape).copy()
+
+    def quality_metrics_need_recompute(self):
+        """
+        True if this repetition has measured points but the fit-
+        residual-based quality metrics (brillouin_peak_snr and its
+        siblings - only evaluate()'s fitting loop populates those,
+        unlike e.g. brillouin_shift_frame_spread, which
+        calculate_derived_values() can backfill from already-fitted
+        peak positions alone) were never computed for them - i.e. this
+        session's saved fit predates those metrics. Used by BMicro's
+        Quality tab to auto-trigger a fresh evaluate() when opened
+        against such a session, rather than showing an empty view.
+        """
+        evm = self.session.evaluation_model()
+        if not evm:
+            return False
+        time_data, _, _, _ = self.get_data('time', 0)
+        if time_data is None:
+            return False
+        measured = ~np.isnan(time_data)
+        if not measured.any():
+            return False
+        snr_data, _, _, _ = self.get_data('brillouin_peak_snr', 0)
+        if snr_data is None:
+            return False
+        return not np.isfinite(snr_data[measured]).any()
+
     def get_fits(self, image_key):
         resolution = self.session.get_payload_resolution()
         indices = self.get_indices_from_key(resolution, image_key)
@@ -1011,6 +1175,27 @@ def calculate_derived_values():
         )
         evm.results['brillouin_shift_f'] = np.nanmin(brillouin_shift_f, 6)
 
+    # Quality metrics (see EvaluationModel.get_default_parameters() for
+    # what each one means) - all NaN-safe, since a point can easily
+    # have some frames/regions missing. Silence numpy's "empty slice"
+    # warnings for the (normal, e.g. unmeasured or single-frame) cases
+    # where a whole axis being reduced over is all-NaN.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(action='ignore', category=RuntimeWarning)
+        frame_spread = (
+            np.nanmax(evm.results['brillouin_shift_f'], axis=3) -
+            np.nanmin(evm.results['brillouin_shift_f'], axis=3))
+        evm.results['brillouin_shift_frame_spread'] = np.repeat(
+            frame_spread[:, :, :, np.newaxis, :, :],
+            shape_brillouin[3], axis=3)
+
+        rayleigh_spread = (
+            np.nanmax(evm.results['rayleigh_peak_position_f'], axis=3) -
+            np.nanmin(evm.results['rayleigh_peak_position_f'], axis=3))
+        evm.results['rayleigh_shift_frame_spread'] = np.repeat(
+            rayleigh_spread[:, :, :, np.newaxis, :, :],
+            shape_rayleigh[3], axis=3)
+
 
 class Controller(object):
 
@@ -1085,6 +1270,10 @@ class ExportController(object):
             'brillouin': {
                 'export': True,
                 'parameters': ['brillouin_shift_f'],
+                # Which Brillouin repetition keys (e.g. '0', '1', ...)
+                # to export - None means "all of them" (every caller
+                # other than BMicro's export dialog leaves this alone).
+                'repetitions': None,
                 'brillouin_shift_f': {
                     'cax': ('min', 'max'),
                 }

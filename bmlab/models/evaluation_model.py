@@ -21,6 +21,15 @@ class EvaluationModel(Serializer):
         self.bounds_w0 = None
         # @since 0.8.0
         self.bounds_fwhm = None
+        # @since 0.13.0
+        # Per-metric quality thresholds set from BMicro's Quality tab,
+        # e.g. {'brillouin_shift_frame_spread': {'enabled': True,
+        # 'max': 1.5e8}} - see EvaluationController.apply_quality_
+        # thresholds(). Kept here (not just in the GUI) so it round-
+        # trips through a saved session like every other setting.
+        # Starts at get_default_quality_thresholds(), not {} - see
+        # that method's docstring for where those numbers come from.
+        self.quality_thresholds = self.get_default_quality_thresholds()
 
         self.results = {}
         for key in self.parameters.keys():
@@ -95,6 +104,35 @@ class EvaluationModel(Serializer):
         if not hasattr(self, 'frequencies'):
             self.frequencies = {}
 
+        # Migrations from 0.12.3 to 0.13.0
+        # @since 0.13.0
+        if 'brillouin_shift_frame_spread' not in self.results:
+            self.results['brillouin_shift_frame_spread'] = np.full(
+                self.results['brillouin_peak_position_f'].shape, np.nan)
+        if 'rayleigh_shift_frame_spread' not in self.results:
+            self.results['rayleigh_shift_frame_spread'] = np.full(
+                self.results['rayleigh_peak_position_f'].shape, np.nan)
+        for key in ('brillouin_peak_snr', 'brillouin_peak_nrmse',
+                    'brillouin_peak_center_uncertainty'):
+            if key not in self.results:
+                self.results[key] = np.full(
+                    self.results['brillouin_peak_position_f'].shape, np.nan)
+        for key in ('rayleigh_peak_snr', 'rayleigh_peak_nrmse',
+                    'rayleigh_peak_center_uncertainty'):
+            if key not in self.results:
+                self.results[key] = np.full(
+                    self.results['rayleigh_peak_position_f'].shape, np.nan)
+        # A stray 'brillouin_snr' key (the old, less accurate
+        # intensity/offset SNR proxy this replaces) can only exist in
+        # sessions saved by a pre-release build of this feature - drop
+        # it rather than carrying dead data forward.
+        self.results.pop('brillouin_snr', None)
+        if 'quality_pass' not in self.results:
+            self.results['quality_pass'] = np.full(
+                self.results['time'].shape, np.nan)
+        if not hasattr(self, 'quality_thresholds'):
+            self.quality_thresholds = self.get_default_quality_thresholds()
+
     def invalidate_results(self):
         for key in self.parameters:
             self.results[key][:] = np.nan
@@ -168,7 +206,147 @@ class EvaluationModel(Serializer):
                 'label': 'Time',
                 'scaling': 1,
             },
+            # Quality metrics - a converged least_squares fit to noise
+            # looks the same, numerically, as a fit to a real peak, so
+            # none of the "real" parameters above can tell good fits
+            # from bad ones on their own. brillouin_peak_snr/_nrmse/
+            # _center_uncertainty (and their rayleigh_ equivalents) are
+            # computed directly by the fit itself, from its own raw
+            # residuals (bmlab.fits._fit_noise_and_covariance()/
+            # _param_uncertainty()) - NOT from e.g. intensity/offset,
+            # since a spectrum can have a high peak/background ratio
+            # and still be extremely noisy. The *_frame_spread metrics
+            # below are a complementary, independent check: computed
+            # after fitting (calculate_derived_values()), from how much
+            # separately-fit frames at the same point disagree.
+            'brillouin_peak_snr': {
+                # [a.u.] Fitted peak amplitude / residual noise SD
+                # (std of y - fitted_curve, in the fitted region) - how
+                # far the peak actually rises above fluctuations the
+                # model can't explain.
+                'unit': 'a.u.',
+                'symbol': r'$\mathrm{SNR}_\mathrm{B}$',
+                'label': 'Brillouin peak SNR (quality)',
+                'scaling': 1,
+            },
+            'brillouin_peak_nrmse': {
+                # [-] Residual noise SD normalized by the fitted peak
+                # amplitude (the inverse of brillouin_peak_snr, kept as
+                # its own metric since a threshold on it reads directly
+                # as "residual is at most X% of the peak height").
+                # Low = clean, well-described peak. High = noisy
+                # spectrum and/or a poor Lorentzian description of it.
+                'unit': '',
+                'symbol': r'$\mathrm{NRMSE}_\mathrm{B}$',
+                'label': 'Brillouin peak fit NRMSE (quality)',
+                'scaling': 1,
+            },
+            'brillouin_peak_center_uncertainty': {
+                # [GHz] The fitted peak center's own standard error,
+                # from the fit's parameter covariance - whether the
+                # Brillouin shift could actually be localized
+                # precisely, independent of whether the fit converged.
+                'unit': 'GHz',
+                'symbol': r'$\sigma_{\nu_\mathrm{B}}$',
+                'label': 'Brillouin peak center uncertainty (quality)',
+                'scaling': 1e-9,
+            },
+            'rayleigh_peak_snr': {
+                # [a.u.] Same as brillouin_peak_snr, for the Rayleigh
+                # fit - the Brillouin shift is computed relative to the
+                # Rayleigh peak position, so a noisy Rayleigh fit
+                # corrupts the shift even when the Brillouin fit itself
+                # looks clean.
+                'unit': 'a.u.',
+                'symbol': r'$\mathrm{SNR}_\mathrm{R}$',
+                'label': 'Rayleigh peak SNR (quality)',
+                'scaling': 1,
+            },
+            'rayleigh_peak_nrmse': {
+                # [-] Same as brillouin_peak_nrmse, for the Rayleigh fit.
+                'unit': '',
+                'symbol': r'$\mathrm{NRMSE}_\mathrm{R}$',
+                'label': 'Rayleigh peak fit NRMSE (quality)',
+                'scaling': 1,
+            },
+            'rayleigh_peak_center_uncertainty': {
+                # [GHz] Same as brillouin_peak_center_uncertainty, for
+                # the Rayleigh fit.
+                'unit': 'GHz',
+                'symbol': r'$\sigma_{\nu_\mathrm{R}}$',
+                'label': 'Rayleigh peak center uncertainty (quality)',
+                'scaling': 1e-9,
+            },
+            'brillouin_shift_frame_spread': {
+                # [GHz] How much independently-fit frames at the same
+                # point disagree on the Brillouin shift (max - min
+                # across frames) - catches cases where a fit looks
+                # locally plausible (good SNR, low center uncertainty)
+                # but has actually jumped to a different, spurious
+                # peak between frames.
+                'unit': 'GHz',
+                'symbol': r'$\Delta\nu_\mathrm{B,frames}$',
+                'label': 'Brillouin shift frame spread (quality)',
+                'scaling': 1e-9,
+            },
+            'rayleigh_shift_frame_spread': {
+                # [GHz] Same idea as brillouin_shift_frame_spread, but
+                # for the Rayleigh peak position.
+                'unit': 'GHz',
+                'symbol': r'$\Delta\nu_\mathrm{R,frames}$',
+                'label': 'Rayleigh position frame spread (quality)',
+                'scaling': 1e-9,
+            },
+            'quality_pass': {
+                # [-] 1 = passes every enabled quality threshold, 0 =
+                # fails at least one, NaN = never measured - see
+                # EvaluationController.apply_quality_thresholds().
+                'unit': '',
+                'symbol': r'$Q$',
+                'label': 'Quality check passed',
+                'scaling': 1,
+            },
         })
+
+    @staticmethod
+    def get_default_quality_thresholds():
+        """
+        Starting thresholds for the quality metrics in
+        get_default_parameters() above - not universal constants, a
+        reasonable starting point to adjust from, not something to
+        trust blindly on a new sample/setup.
+
+        brillouin_shift_frame_spread's 0.2 GHz max is the one
+        empirically grounded number here: inspecting a real dataset
+        (Xenopus brain tissue, 1938 measured points) showed a clean
+        bimodal split - a well-behaved cluster from 0-0.12 GHz, a
+        near-empty gap, then a distinct population of clear fit
+        failures from 1.7-2.9 GHz - and 0.2 GHz sits right in that
+        gap. rayleigh_shift_frame_spread mirrors it, since it's the
+        same reproducibility check on the other peak. The SNR/NRMSE
+        defaults (amplitude >= noise SD; residual <= peak amplitude)
+        are physically-reasoned starting points, not yet checked
+        against real data the same way. No default is set for
+        center_uncertainty or brillouin_peak_fwhm_f - the former
+        because its natural scale wasn't established this way either,
+        the latter because FWHM can carry real biological information
+        and isn't recommended as a primary filter (see the Brillouin
+        peak fitting discussion this was designed around).
+        """
+        return {
+            'brillouin_shift_frame_spread': {
+                'enabled': True, 'min': None, 'max': 0.2},
+            'rayleigh_shift_frame_spread': {
+                'enabled': True, 'min': None, 'max': 0.2},
+            'brillouin_peak_snr': {
+                'enabled': True, 'min': 1.0, 'max': None},
+            'rayleigh_peak_snr': {
+                'enabled': True, 'min': 1.0, 'max': None},
+            'brillouin_peak_nrmse': {
+                'enabled': True, 'min': None, 'max': 1.0},
+            'rayleigh_peak_nrmse': {
+                'enabled': True, 'min': None, 'max': 1.0},
+        }
 
     def initialize_results_arrays(self, dims):
         shape_general = (
@@ -217,6 +395,35 @@ class EvaluationModel(Serializer):
         self.results['brillouin_peak_fwhm_f'] = np.empty(shape_brillouin)
         self.results['brillouin_peak_fwhm_f'][:] = np.nan
 
+        # Fit-quality diagnostics, computed directly by the fit itself
+        # (see bmlab.fits._fit_noise_and_covariance()/
+        # _param_uncertainty()) - unlike brillouin_shift_frame_spread
+        # etc. below, these need no separate derived-value pass.
+        self.results['brillouin_peak_snr'] = np.empty(shape_brillouin)
+        self.results['brillouin_peak_snr'][:] = np.nan
+
+        self.results['brillouin_peak_nrmse'] = np.empty(shape_brillouin)
+        self.results['brillouin_peak_nrmse'][:] = np.nan
+
+        self.results['brillouin_peak_center_uncertainty'] = np.empty(
+            shape_brillouin)
+        self.results['brillouin_peak_center_uncertainty'][:] = np.nan
+
+        # Derived (not fit-direct) quality diagnostic - only
+        # controllers.calculate_derived_values() actually computes
+        # this, from already-fitted peak positions, but it must exist
+        # here too: get_default_quality_thresholds() enables a
+        # threshold on it by default, and compute_quality_mask()
+        # evaluates every enabled threshold's metric via get_data(),
+        # which would otherwise find no array (or, worse, a
+        # differently-shaped leftover one from whatever this
+        # EvaluationModel's `results` dict held before) for a
+        # repetition that hasn't gone through calculate_derived_values
+        # yet.
+        self.results['brillouin_shift_frame_spread'] = np.empty(
+            shape_brillouin)
+        self.results['brillouin_shift_frame_spread'][:] = np.nan
+
         shape_rayleigh = (
             dims['dim_x'],
             dims['dim_y'],
@@ -241,6 +448,21 @@ class EvaluationModel(Serializer):
 
         self.results['rayleigh_shift'] = np.empty(shape_rayleigh)
         self.results['rayleigh_shift'][:] = np.nan
+
+        self.results['rayleigh_peak_snr'] = np.empty(shape_rayleigh)
+        self.results['rayleigh_peak_snr'][:] = np.nan
+
+        self.results['rayleigh_peak_nrmse'] = np.empty(shape_rayleigh)
+        self.results['rayleigh_peak_nrmse'][:] = np.nan
+
+        self.results['rayleigh_peak_center_uncertainty'] = np.empty(
+            shape_rayleigh)
+        self.results['rayleigh_peak_center_uncertainty'][:] = np.nan
+
+        # See brillouin_shift_frame_spread above.
+        self.results['rayleigh_shift_frame_spread'] = np.empty(
+            shape_rayleigh)
+        self.results['rayleigh_shift_frame_spread'][:] = np.nan
 
     def set_spectra(self, image_key, spectra):
         self.spectra[image_key] = spectra

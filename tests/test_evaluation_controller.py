@@ -170,6 +170,180 @@ def test_calculate_derived_values_equal_region_count_nr_peaks_2():
     assert (evm.results['brillouin_shift_f'][:, :, :, :, 1, 1] == 3).all()
 
 
+def test_calculate_derived_values_quality_metrics():
+    """
+    brillouin_shift_frame_spread/rayleigh_shift_frame_spread (max-min
+    across frames, broadcast back to every frame) - see
+    EvaluationModel.get_default_parameters(). The other quality
+    metrics (brillouin_peak_snr etc.) are set directly by the fit
+    itself, not here - see test_evaluate_sets_quality_diagnostics().
+    """
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path('Water.h5'))
+    evc.session.set_current_repetition('0')
+    evm = evc.session.evaluation_model()
+
+    evm.initialize_results_arrays({
+        'dim_x': 2,
+        'dim_y': 2,
+        'dim_z': 1,
+        'nr_images': 2,
+        'nr_brillouin_regions': 1,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 1,
+    })
+
+    # Two frames disagreeing by a known amount on both peaks' positions.
+    # brillouin_shift_f is |brillouin_peak_position_f -
+    # rayleigh_peak_position_f|, so its frame spread combines both:
+    # frame 0 shift = |5.0 - 0.0| = 5.0, frame 1 shift = |5.2 - 0.5| =
+    # 4.7, spread = 0.3.
+    evm.results['brillouin_peak_position_f'][:, :, :, 0, :, :] = 5.0
+    evm.results['brillouin_peak_position_f'][:, :, :, 1, :, :] = 5.2
+    evm.results['rayleigh_peak_position_f'][:, :, :, 0, :, :] = 0.0
+    evm.results['rayleigh_peak_position_f'][:, :, :, 1, :, :] = 0.5
+
+    calculate_derived_values()
+
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_frame_spread'],
+        0.3 * np.ones_like(evm.results['brillouin_shift_frame_spread']))
+    np.testing.assert_allclose(
+        evm.results['rayleigh_shift_frame_spread'],
+        0.5 * np.ones_like(evm.results['rayleigh_shift_frame_spread']))
+
+    # Both frames' broadcast-back copies must agree (the spread is a
+    # per-point value, not really per-frame).
+    np.testing.assert_allclose(
+        evm.results['brillouin_shift_frame_spread'][:, :, :, 0],
+        evm.results['brillouin_shift_frame_spread'][:, :, :, 1])
+
+    # And it must round-trip through get_data() (peak-index slicing,
+    # frame/region averaging, unit scaling) without raising, same as
+    # any other registered parameter.
+    data, positions, dimensionality, labels = evc.get_data(
+        'brillouin_shift_frame_spread', 0)
+    np.testing.assert_allclose(data, 0.3 * 1e-9 * np.ones_like(data))
+
+
+def test_quality_thresholds():
+    """
+    set_quality_threshold()/compute_quality_mask()/
+    apply_quality_thresholds() - the API BMicro's Quality tab drives.
+    A point that was never measured ('time' is NaN, e.g. outside the
+    ROI) must never count as passing OR failing; among measured
+    points, only the enabled threshold(s) decide.
+    """
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path('Water.h5'))
+    evc.session.set_current_repetition('0')
+    evm = evc.session.evaluation_model()
+
+    evm.initialize_results_arrays({
+        'dim_x': 2,
+        'dim_y': 2,
+        'dim_z': 1,
+        'nr_images': 1,
+        'nr_brillouin_regions': 1,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 1,
+    })
+    # This test is about set_quality_threshold()/compute_quality_mask()
+    # mechanics, not about what the defaults are (see
+    # test_default_quality_thresholds() for that) - start from a clean
+    # slate rather than get_default_quality_thresholds(), since this
+    # test only ever populates 'brillouin_peak_snr' and every other
+    # default-enabled metric would otherwise fail every point (NaN
+    # never satisfies a threshold).
+    evm.quality_thresholds = {}
+
+    # (0, 0) and (1, 0): measured, good SNR - should pass.
+    # (0, 1): measured, bad SNR - should fail.
+    # (1, 1): never measured (time stays NaN) - not pass, not fail.
+    evm.results['time'][0, 0, 0, 0, 0, 0] = 1.0
+    evm.results['time'][1, 0, 0, 0, 0, 0] = 1.0
+    evm.results['time'][0, 1, 0, 0, 0, 0] = 1.0
+    evm.results['brillouin_peak_snr'][0, 0, 0, 0, 0, 0] = 2.0
+    evm.results['brillouin_peak_snr'][1, 0, 0, 0, 0, 0] = 2.0
+    evm.results['brillouin_peak_snr'][0, 1, 0, 0, 0, 0] = 0.1
+
+    # No threshold enabled yet - every measured point passes.
+    mask, measured = evc.compute_quality_mask()
+    assert measured.sum() == 3
+    assert mask.sum() == 3
+
+    evc.set_quality_threshold('brillouin_peak_snr', min_value=0.5)
+    assert evc.session.evaluation_model()\
+        .quality_thresholds['brillouin_peak_snr'] == \
+        {'enabled': True, 'min': 0.5, 'max': None}
+
+    mask, measured = evc.compute_quality_mask()
+    assert mask[:, :, 0].tolist() == [[True, False], [True, False]]
+
+    evc.apply_quality_thresholds()
+    quality_pass = evm.results['quality_pass'][:, :, 0, 0, 0, 0]
+    assert quality_pass[0, 0] == 1.0
+    assert quality_pass[1, 0] == 1.0
+    assert quality_pass[0, 1] == 0.0
+    assert np.isnan(quality_pass[1, 1])
+
+    # A disabled threshold is ignored entirely.
+    evc.set_quality_threshold('brillouin_peak_snr', enabled=False)
+    mask, measured = evc.compute_quality_mask()
+    assert mask.sum() == measured.sum() == 3
+
+    # Explicitly clearing a bound (min_value=None) must actually clear
+    # it, not be treated as "field not passed, leave it as it was" -
+    # this is what unchecking a threshold's checkbox in the GUI does.
+    evc.set_quality_threshold(
+        'brillouin_peak_snr', enabled=True, min_value=0.5)
+    mask, measured = evc.compute_quality_mask()
+    assert mask.sum() == 2
+    evc.set_quality_threshold('brillouin_peak_snr', min_value=None)
+    assert evc.session.evaluation_model()\
+        .quality_thresholds['brillouin_peak_snr']['min'] is None
+    mask, measured = evc.compute_quality_mask()
+    assert mask.sum() == measured.sum() == 3
+
+
+def test_default_quality_thresholds():
+    """
+    A fresh EvaluationModel (new file, no prior thresholds saved)
+    starts with the data-driven defaults, not an empty dict - and
+    compute_quality_mask() can evaluate them (including
+    brillouin_shift_frame_spread/rayleigh_shift_frame_spread, which
+    only calculate_derived_values() populates - see
+    initialize_results_arrays()) without raising, even before that
+    ever runs.
+    """
+    evm = EvaluationModel()
+    assert evm.quality_thresholds == \
+        EvaluationModel.get_default_quality_thresholds()
+
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path('Water.h5'))
+    evc.session.set_current_repetition('0')
+    evm = evc.session.evaluation_model()
+    evm.initialize_results_arrays({
+        'dim_x': 2,
+        'dim_y': 2,
+        'dim_z': 1,
+        'nr_images': 1,
+        'nr_brillouin_regions': 1,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 1,
+    })
+    assert evm.quality_thresholds == \
+        EvaluationModel.get_default_quality_thresholds()
+
+    evm.results['time'][0, 0, 0, 0, 0, 0] = 1.0
+    mask, measured = evc.compute_quality_mask()
+    assert measured.sum() == 1
+    # Every default-enabled metric is still NaN (nothing fitted this
+    # point yet) - NaN never satisfies a threshold, so it fails.
+    assert mask.sum() == 0
+
+
 def test_calculate_derived_values_different_region_count():
     evc = EvaluationController()
     evc.session.set_file(data_file_path('Water.h5'))

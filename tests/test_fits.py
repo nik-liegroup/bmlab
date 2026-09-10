@@ -20,12 +20,19 @@ def test_fit_lorentz():
     intensity = 10.
     y_data = lorentz(x, w0, fwhm, intensity) + offset
 
-    actual_w0, actual_fwhm, actual_intensity, actual_offset =\
+    actual_w0, actual_fwhm, actual_intensity, actual_offset, \
+        actual_snr, actual_nrmse, actual_center_unc = \
         fit_lorentz(x, y_data)
     np.testing.assert_almost_equal(actual_w0, w0, decimal=3)
     np.testing.assert_almost_equal(actual_fwhm, fwhm, decimal=3)
     np.testing.assert_almost_equal(actual_intensity, intensity, decimal=3)
     np.testing.assert_almost_equal(actual_offset, offset, decimal=3)
+    # Noiseless synthetic data - the model explains it essentially
+    # perfectly, so SNR is huge, NRMSE and the center's own
+    # uncertainty are both essentially zero.
+    assert actual_snr > 1e5
+    assert actual_nrmse < 1e-5
+    assert actual_center_unc < 1e-3
 
 
 def test_fit_lorentz_real_image_data():
@@ -39,13 +46,18 @@ def test_fit_lorentz_real_image_data():
     xdata = np.load(data_dir / 'rayleigh_reg0_xdata.npy')
     ydata = np.load(data_dir / 'rayleigh_reg0_ydata.npy')
 
-    w0, fwhm, intensity, offset = fit_lorentz(xdata[range(*region)],
-                                              ydata[range(*region)])
+    w0, fwhm, intensity, offset, snr, nrmse, center_unc = fit_lorentz(
+        xdata[range(*region)], ydata[range(*region)])
 
     assert w0 == pytest.approx(115, 0.2)
     assert fwhm == pytest.approx(6, 0.5)
     assert intensity == pytest.approx(1186, 1)
     assert offset == pytest.approx(47, 1)
+    # Real (noisy) data - just check the new diagnostics are sane,
+    # without pinning exact values.
+    assert snr > 1
+    assert 0 < nrmse < 1
+    assert center_unc > 0
 
 
 def test_fit_double_lorentz():
@@ -61,7 +73,7 @@ def test_fit_double_lorentz():
     y_data = lorentz(x, w0_left, fwhm_left, intensity_left)
     y_data += lorentz(x, w0_right, fwhm_right, intensity_right) + offset
 
-    w0s, fwhms, intens, actual_offset\
+    w0s, fwhms, intens, actual_offset, snrs, nrmses, center_uncs\
         = fit_double_lorentz(x, y_data)
 
     np.testing.assert_almost_equal(w0s[0], w0_left, decimal=3)
@@ -73,6 +85,13 @@ def test_fit_double_lorentz():
     np.testing.assert_almost_equal(intens[1], intensity_right, decimal=3)
 
     np.testing.assert_almost_equal(actual_offset, offset, decimal=3)
+
+    # Noiseless synthetic data, for both peaks.
+    assert len(snrs) == len(nrmses) == len(center_uncs) == 2
+    for snr, nrmse, center_unc in zip(snrs, nrmses, center_uncs):
+        assert snr > 1e4
+        assert nrmse < 1e-4
+        assert center_unc < 1e-2
 
 
 def test_fit_quadruple_lorentz():
@@ -102,7 +121,7 @@ def test_fit_quadruple_lorentz():
     y_data += lorentz(x, w0_2, fwhm_2, intensity_2)
     y_data += lorentz(x, w0_3, fwhm_3, intensity_3) + offset
 
-    w0s, fwhms, intens, actual_offset\
+    w0s, fwhms, intens, actual_offset, snrs, nrmses, center_uncs\
         = fit_quadruple_lorentz(x, y_data)
 
     np.testing.assert_almost_equal(w0s[0], w0_0, decimal=3)
@@ -123,6 +142,13 @@ def test_fit_quadruple_lorentz():
 
     np.testing.assert_almost_equal(actual_offset, offset, decimal=3)
 
+    # Noiseless synthetic data, for all four peaks.
+    assert len(snrs) == len(nrmses) == len(center_uncs) == 4
+    for snr, nrmse, center_unc in zip(snrs, nrmses, center_uncs):
+        assert snr > 1e4
+        assert nrmse < 1e-4
+        assert center_unc < 1e-2
+
 
 def test_fit_double_lorentz_with_bounds():
     # Arrange
@@ -139,7 +165,7 @@ def test_fit_double_lorentz_with_bounds():
 
     bounds_w0 = ((19, 19.9), (-np.inf, np.inf))
 
-    w0s, fwhms, intens, actual_offset \
+    w0s, fwhms, intens, actual_offset, *_ \
         = fit_double_lorentz(x, y_data, bounds_w0)
 
     np.testing.assert_almost_equal(w0s[0], 19.9, decimal=2)
@@ -154,7 +180,7 @@ def test_fit_double_lorentz_with_bounds():
 
     bounds_w0 = ((-np.inf, np.inf), (20.1, 21))
 
-    w0s, fwhms, intens, actual_offset \
+    w0s, fwhms, intens, actual_offset, *_ \
         = fit_double_lorentz(x, y_data, bounds_w0)
 
     np.testing.assert_almost_equal(w0s[0], w0_right, decimal=1)
@@ -170,7 +196,7 @@ def test_fit_double_lorentz_with_bounds():
     bounds_w0 = ((20.1, 21), (-np.inf, np.inf))
     bounds_fwhm = ((-np.inf, np.inf), (5.1, np.inf))
 
-    w0s, fwhms, intens, actual_offset \
+    w0s, fwhms, intens, actual_offset, *_ \
         = fit_double_lorentz(x, y_data,
                              bounds_w0=bounds_w0, bounds_fwhm=bounds_fwhm)
 
@@ -186,7 +212,7 @@ def test_fit_double_lorentz_with_bounds():
 
     bounds_fwhm = ((-np.inf, np.inf), (5.1, np.inf))
 
-    w0s, fwhms, intens, actual_offset \
+    w0s, fwhms, intens, actual_offset, *_ \
         = fit_double_lorentz(x, y_data,
                              bounds_w0=None, bounds_fwhm=bounds_fwhm)
 
@@ -241,7 +267,7 @@ def test_fit_quadruple_lorentz_with_bounds():
         (-np.inf, np.inf)
     )
 
-    w0s, fwhms, intens, actual_offset\
+    w0s, fwhms, intens, actual_offset, *_\
         = fit_quadruple_lorentz(x, y_data,
                                 bounds_w0=bounds_w0, bounds_fwhm=bounds_fwhm)
 

@@ -1,3 +1,4 @@
+import csv
 import os
 
 import numpy as np
@@ -7,7 +8,7 @@ from bmlab import Session
 from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL, FLUORESCENCE_GROUP
 from bmlab.export.timing import get_brillouin_windows, classify_timing
 from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
-    warp_local, um_offset_to_pixels
+    warp_local, um_offset_to_pixels, get_point_to_pixel_matrix
 
 # Two tile/z positions closer than this (um) are treated as "the same
 # point" - generous enough to absorb float noise and hysteresis-
@@ -148,7 +149,9 @@ class OverviewBrightfieldExport(object):
                 filename = path / f"{name_stub}.tif"
             else:
                 filename = path / f"{name_stub}_cameraPixels.tif"
-            self._export_stack(repetition, image_keys, tmatrix, filename)
+            self._export_stack(
+                repetition, image_keys, positions, tmatrix, pixels_per_um,
+                filename)
 
     @staticmethod
     def _group_by_tile(positions):
@@ -168,23 +171,33 @@ class OverviewBrightfieldExport(object):
             tiles.setdefault(key, []).append(idx)
         return tiles
 
-    def _export_stack(self, repetition, image_keys, tmatrix, filename):
+    def _export_stack(
+            self, repetition, image_keys, positions, tmatrix,
+            pixels_per_um, filename):
         """
         A single-xy (or unaligned) z-stack: every frame gets the same
         warp (they share the same footprint, only z differs), so the
         pages come out consistently sized without any extra placement
         logic - or, with no scale calibration, the frames are saved
-        exactly as captured.
+        exactly as captured. `positions` is the same list `_export_group`
+        received - since every frame shares one footprint, the first
+        one with a recorded position anchors the transform matrix
+        written alongside the image (see get_point_to_pixel_matrix()).
         """
         frames = []
-        for image_key in image_keys:
+        anchor_um, anchor_shape, anchor_translate = None, None, None
+        for image_key, position in zip(image_keys, positions):
             img_data = repetition.payload.get_image(image_key)
             if img_data is None:
                 continue
             img_data = np.nanmean(img_data, axis=0)
             if tmatrix is not None:
-                warped, _, _ = warp_local(img_data, tmatrix)
+                warped, _, translate = warp_local(img_data, tmatrix)
                 frame = np.nan_to_num(warped, nan=0.0).astype(np.ubyte)
+                if anchor_um is None and position is not None:
+                    anchor_um = (position['x'], position['y'])
+                    anchor_shape = img_data.shape
+                    anchor_translate = translate
             else:
                 frame = img_data.astype(np.ubyte)
             frames.append(frame)
@@ -195,6 +208,11 @@ class OverviewBrightfieldExport(object):
         images = [Image.fromarray(frame) for frame in frames]
         images[0].save(
             filename, save_all=True, append_images=images[1:])
+
+        matrix = get_point_to_pixel_matrix(
+            tmatrix, pixels_per_um, anchor_um, anchor_shape,
+            anchor_translate)
+        self._write_transform_csv(matrix, filename)
 
     def _export_tiled(
             self, repetition, image_keys, positions, tiles, tmatrix,
@@ -217,7 +235,15 @@ class OverviewBrightfieldExport(object):
                 unique_z.append(z)
         unique_z.sort()
 
+        # The rotation/scale (tmatrix, pixels_per_um) and each tile's own
+        # warp_local() translate are the same for every tile (same camera,
+        # same calibration) - only the placement offset differs by tile
+        # position - so one page's placement geometry (reference tile's
+        # own shape/translate, plus the canvas' own min_x/min_y) is enough
+        # to build a single transform matrix that is valid for every tile
+        # in the mosaic, not just the reference one.
         pages = []
+        placement = None
         for z in unique_z:
             warped_tiles = []
             for tile_xy, indices in tiles.items():
@@ -231,14 +257,19 @@ class OverviewBrightfieldExport(object):
                 if img_data is None:
                     continue
                 img_data = np.nanmean(img_data, axis=0)
-                warped, _, _ = warp_local(img_data, tmatrix)
+                warped, _, translate = warp_local(img_data, tmatrix)
                 dx_um = tile_xy[0] - reference_xy[0]
                 dy_um = tile_xy[1] - reference_xy[1]
                 dx_px, dy_px = um_offset_to_pixels(
                     tmatrix, pixels_per_um, dx_um, dy_um)
                 warped_tiles.append((warped, dx_px, dy_px))
+                if placement is None and tile_xy == reference_xy:
+                    placement = (img_data.shape, translate)
             if warped_tiles:
-                pages.append(self._compose_mosaic(warped_tiles))
+                canvas, min_x, min_y = self._compose_mosaic(warped_tiles)
+                pages.append(canvas)
+                if placement is not None and len(placement) == 2:
+                    placement = placement + (min_x, min_y)
 
         if not pages:
             return
@@ -249,6 +280,14 @@ class OverviewBrightfieldExport(object):
         ]
         images[0].save(
             filename, save_all=True, append_images=images[1:])
+
+        matrix = None
+        if placement is not None and len(placement) == 4:
+            (anchor_shape, anchor_translate, min_x, min_y) = placement
+            matrix = get_point_to_pixel_matrix(
+                tmatrix, pixels_per_um, reference_xy, anchor_shape,
+                anchor_translate, placement_offset_px=(-min_x, -min_y))
+        self._write_transform_csv(matrix, filename)
 
     @staticmethod
     def _compose_mosaic(warped_tiles):
@@ -268,7 +307,25 @@ class OverviewBrightfieldExport(object):
             # avoids double-brightening the tiles' overlap margin.
             empty = np.isnan(region)
             region[empty] = warped[:region.shape[0], :region.shape[1]][empty]
-        return canvas
+        return canvas, min_x, min_y
+
+    @staticmethod
+    def _write_transform_csv(matrix, image_filename):
+        """
+        Writes the 3x3 matrix mapping an absolute stage position (x, y,
+        um) to its pixel location in `image_filename`'s image, next to
+        it as plain a plain 3-row/3-column CSV (no header) - same
+        layout as BrainFusion's AFM loader already expects for its own
+        GridInversionMatrix.csv. Writes nothing if `matrix` is None (no
+        scale calibration, or no recorded position for this image).
+        """
+        if matrix is None:
+            return
+        csv_filename = image_filename.with_name(
+            image_filename.stem + '_transform.csv')
+        with open(csv_filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            writer.writerows(matrix.tolist())
 
     def _plot_path(self):
         if self.file.path.parent.name == 'RawData':
