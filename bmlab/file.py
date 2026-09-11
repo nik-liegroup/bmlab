@@ -24,6 +24,14 @@ FLUORESCENCE_GROUP = 'Fluorescence'
 # this channel attribute (no dedicated HDF5 group exists for them).
 OVERVIEW_BRIGHTFIELD_CHANNEL = 'Brightfield z overview'
 
+# Channel name for a plain single-shot brightfield snapshot, as taken
+# e.g. right before a scan starts (its own single-image Fluorescence
+# repetition, not the OVERVIEW_BRIGHTFIELD_CHANNEL z-stack/tile
+# capture) - handled the same way by OverviewBrightfieldExport so
+# these "before" images get a .tif and transform matrix too, not just
+# "during"/"after" ones.
+BRIGHTFIELD_CHANNEL = 'Brightfield'
+
 
 def _get_datetime(time_stamp):
     """ Convert the time stamp in the HDF file to Python datetime """

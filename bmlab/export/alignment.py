@@ -111,3 +111,57 @@ def um_offset_to_pixels(tmatrix, pixels_per_um, dx_um, dy_um):
     offset = tmatrix * np.matrix([[dx_um], [dy_um], [0]])
     return (float(offset[0, 0]) * pixels_per_um,
             float(offset[1, 0]) * pixels_per_um)
+
+
+def get_point_to_pixel_matrix(tmatrix, pixels_per_um, anchor_um, image_shape,
+                              local_translate, placement_offset_px=(0.0, 0.0)):
+    """
+    Builds the 3x3 affine matrix M mapping an arbitrary absolute stage
+    position (x, y, in um - the same coordinates written into a
+    BrillouinExport data CSV) directly onto its pixel location (col,
+    row) in one exported overview image, i.e.
+    [col, row, 1] = M @ [x_um, y_um, 1].
+
+    `anchor_um` is the (x, y) stage position that image's own raw
+    camera frame was captured/targeted at (see
+    Payload.get_position()/get_overview_brightfield_positions()) -
+    absent any finer (e.g. principal-point) calibration, that position
+    is assumed to sit at the raw frame's own geometric center.
+    `image_shape` is that raw frame's (height, width), and
+    `local_translate` is the `translate` warp_local() returned for it
+    (both already computed by the caller while building the actual
+    exported image, so the matrix is guaranteed to agree with it).
+    `placement_offset_px`, for a tiled mosaic, additionally places the
+    tile within the shared canvas (see
+    OverviewBrightfieldExport._export_tiled) - (0, 0) for a plain,
+    single-position stack.
+
+    Returns
+    -------
+    np.ndarray or None
+        None if `tmatrix`, `pixels_per_um` or `anchor_um` is None (no
+        scale calibration, or no recorded position for this image).
+    """
+    if tmatrix is None or pixels_per_um is None or anchor_um is None:
+        return None
+
+    height, width = image_shape[0], image_shape[1]
+    center = np.matrix([[(width - 1) / 2], [(height - 1) / 2], [1]])
+    local_center = local_translate * tmatrix * center
+
+    # Same direction+scale composition as um_offset_to_pixels(): a
+    # stage (dx, dy) offset (um) rotated into the image's own pixel
+    # axes, then scaled from um into pixels.
+    linear = pixels_per_um * np.asarray(tmatrix)[:2, :2]
+    anchor = np.array([anchor_um[0], anchor_um[1]])
+    translation = (
+        np.array([local_center[0, 0], local_center[1, 0]])
+        + np.array(placement_offset_px)
+        - linear @ anchor
+    )
+
+    return np.array([
+        [linear[0, 0], linear[0, 1], translation[0]],
+        [linear[1, 0], linear[1, 1], translation[1]],
+        [0, 0, 1],
+    ])

@@ -18,6 +18,74 @@ def lorentz(x, w0, fwhm, intensity):
                ((fwhm / 2) ** 2) / ((x - w0) ** 2 + (fwhm / 2) ** 2)
 
 
+def _numerical_jacobian(residual_func, params, rel_step=1e-6):
+    """
+    Finite-difference Jacobian of `residual_func` (a function of the
+    parameter vector alone, returning the raw - not squared - per-point
+    residual) at `params`, used by _fit_diagnostics() for a standard
+    least-squares parameter covariance estimate (the same approach
+    scipy.optimize.curve_fit uses internally for its own `pcov`). Each
+    parameter's own step scales with its magnitude, since w0/fwhm (Hz,
+    ~1e9) and intensity/offset (a.u., ~1e2) sit on very different
+    scales.
+    """
+    params = np.asarray(params, dtype=float)
+    f0 = residual_func(params)
+    jac = np.empty((f0.size, params.size))
+    for i in range(params.size):
+        step = rel_step * max(abs(params[i]), 1.0)
+        params_step = params.copy()
+        params_step[i] += step
+        jac[:, i] = (residual_func(params_step) - f0) / step
+    return jac
+
+
+def _fit_noise_and_covariance(residual_func, params):
+    """
+    Computed once per converged fit (one spectrum, whether it holds
+    one Lorentz peak or several sharing one residual) and shared by
+    every peak's own diagnostics - independent of (and in addition to)
+    the fitted peak parameters themselves, since a converged fit can
+    still be a fit to noise:
+
+    noise_std: residual scatter the model does not explain (estimated
+        as the RMS residual, using N - len(params) degrees of freedom).
+    cov: the parameter covariance matrix, from the standard
+        covariance-from-Jacobian formula (the same approach
+        scipy.optimize.curve_fit uses internally for its own `pcov`) -
+        or None if the Jacobian is singular (e.g. a fully flat/
+        degenerate fit).
+    """
+    residuals = residual_func(params)
+    dof = max(residuals.size - params.size, 1)
+    noise_std = np.sqrt(np.sum(residuals ** 2) / dof)
+
+    jac = _numerical_jacobian(residual_func, params)
+    try:
+        cov = np.linalg.inv(jac.T @ jac) * noise_std ** 2
+    except np.linalg.LinAlgError:
+        cov = None
+
+    return noise_std, cov
+
+
+def _param_uncertainty(cov, index):
+    """
+    A fitted parameter's own standard error (`index` into `cov`, see
+    _fit_noise_and_covariance()) - large means that parameter could
+    not actually be pinned down precisely, even if the fit converged.
+    NaN if `cov` is None (singular Jacobian) or not a real number
+    (e.g. a negative diagonal, which a numerically ill-conditioned fit
+    can produce).
+    """
+    if cov is None:
+        return np.nan
+    variance = cov[index, index]
+    if not np.isfinite(variance) or variance < 0:
+        return np.nan
+    return np.sqrt(variance)
+
+
 def fit_lorentz(x, y):
     w0_guess = float(x[np.argmax(y)])
     offset_guess = (y[0] + y[-1]) / 2.
@@ -51,7 +119,15 @@ def fit_lorentz(x, y):
 
     w0, fwhm, intensity, offset = opt_result.x
 
-    return w0, fwhm, intensity, offset
+    def raw_residual(params):
+        return y - lorentz(x, *params[0:3]) - params[3]
+
+    noise_std, cov = _fit_noise_and_covariance(raw_residual, opt_result.x)
+    center_uncertainty = _param_uncertainty(cov, 0)
+    snr = intensity / noise_std if noise_std > 0 else np.inf
+    nrmse = noise_std / intensity if intensity > 0 else np.inf
+
+    return w0, fwhm, intensity, offset, snr, nrmse, center_uncertainty
 
 
 def fit_double_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
@@ -161,7 +237,25 @@ def fit_double_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
     res = opt_result.x
     w0s, fwhms, intens = (res[0], res[3]), (res[1], res[4]), (res[2], res[5])
     offset = res[6]
-    return w0s, fwhms, intens, offset
+
+    def raw_residual(params):
+        return (y
+                - lorentz(x, *params[0:3])
+                - lorentz(x, *params[3:6])
+                - params[6])
+
+    # Both peaks share one residual/noise estimate (one spectrum, one
+    # fit) - computed once, then each peak's own center uncertainty is
+    # just a different diagonal entry of the same covariance matrix.
+    noise_std, cov = _fit_noise_and_covariance(raw_residual, res)
+    center_uncertainties = (
+        _param_uncertainty(cov, 0), _param_uncertainty(cov, 3))
+    snrs = tuple(
+        i / noise_std if noise_std > 0 else np.inf for i in intens)
+    nrmses = tuple(
+        noise_std / i if i > 0 else np.inf for i in intens)
+
+    return w0s, fwhms, intens, offset, snrs, nrmses, center_uncertainties
 
 
 def fit_quadruple_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
@@ -294,7 +388,28 @@ def fit_quadruple_lorentz(x, y, bounds_w0=None, bounds_fwhm=None):
                          (res[1], res[4], res[7], res[10]), \
                          (res[2], res[5], res[8], res[11])
     offset = res[12]
-    return w0s, fwhms, intens, offset
+
+    def raw_residual(params):
+        return (y
+                - lorentz(x, *params[0:3])
+                - lorentz(x, *params[3:6])
+                - lorentz(x, *params[6:9])
+                - lorentz(x, *params[9:12])
+                - params[12])
+
+    # All four peaks share one residual/noise estimate (one spectrum,
+    # one fit) - computed once, then each peak's own center
+    # uncertainty is just a different diagonal entry of the same
+    # covariance matrix.
+    noise_std, cov = _fit_noise_and_covariance(raw_residual, res)
+    center_uncertainties = tuple(
+        _param_uncertainty(cov, idx) for idx in (0, 3, 6, 9))
+    snrs = tuple(
+        i / noise_std if noise_std > 0 else np.inf for i in intens)
+    nrmses = tuple(
+        noise_std / i if i > 0 else np.inf for i in intens)
+
+    return w0s, fwhms, intens, offset, snrs, nrmses, center_uncertainties
 
 
 def fit_circle(points):
@@ -375,7 +490,14 @@ def fit_lorentz_region(region, xdata, ydata, nr_peaks=1,
 
     Returns
     -------
-    center, full-width-half-maximum, intensity and offset
+    center, full-width-half-maximum, intensity, offset, snr, nrmse and
+    center_uncertainty - see _fit_noise_and_covariance()/
+    _param_uncertainty() for what the last three mean. snr/nrmse use
+    noise estimated from the fit's own residuals (not e.g. intensity
+    over offset - a spectrum can have a high peak/background ratio and
+    still be extremely noisy), so they only exist once a fit actually
+    ran - they, and center_uncertainty, are NaN on any exception below,
+    same as the other four.
     """
     try:
         idx_l = np.nanargmin(np.abs(xdata - region[0]))
@@ -387,24 +509,27 @@ def fit_lorentz_region(region, xdata, ydata, nr_peaks=1,
         x = x[mask]
         y = y[mask]
         if nr_peaks == 1:
-            w0s, fwhms, intensities, offset = fit_lorentz(
-                x, y)
+            w0s, fwhms, intensities, offset, snr, nrmse, center_unc = \
+                fit_lorentz(x, y)
         elif nr_peaks == 2:
-            w0s, fwhms, intensities, offset = fit_double_lorentz(
-                x, y,
-                bounds_w0=bounds_w0,
-                bounds_fwhm=bounds_fwhm)
+            w0s, fwhms, intensities, offset, snr, nrmse, center_unc = \
+                fit_double_lorentz(
+                    x, y,
+                    bounds_w0=bounds_w0,
+                    bounds_fwhm=bounds_fwhm)
         elif nr_peaks == 4:
-            w0s, fwhms, intensities, offset = fit_quadruple_lorentz(
-                x, y,
-                bounds_w0=bounds_w0,
-                bounds_fwhm=bounds_fwhm)
+            w0s, fwhms, intensities, offset, snr, nrmse, center_unc = \
+                fit_quadruple_lorentz(
+                    x, y,
+                    bounds_w0=bounds_w0,
+                    bounds_fwhm=bounds_fwhm)
         else:
             return
     except Exception:
-        w0s = fwhms = intensities = offset = np.nan
+        w0s = fwhms = intensities = offset \
+            = snr = nrmse = center_unc = np.nan
     finally:
-        return w0s, fwhms, intensities, offset
+        return w0s, fwhms, intensities, offset, snr, nrmse, center_unc
 
 
 def calculate_exact_circle(points):

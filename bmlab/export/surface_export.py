@@ -43,6 +43,35 @@ class SurfaceExport(object):
                 if repetition.payload.positions is not None else None
             positions_y = repetition.payload.positions['y'] \
                 if repetition.payload.positions is not None else None
+            prescan_x = data.get('prescan_x')
+            prescan_y = data.get('prescan_y')
+            roi_polygon_x = data.get('roi_polygon_x')
+            roi_polygon_y = data.get('roi_polygon_y')
+
+            # Center x/y on one shared offset (preferring the main
+            # grid's own mean, the same "relative sample coordinates"
+            # convention the main Brillouin plots use) so the absolute
+            # stage position - a large coordinate carrying no
+            # information about the scanned area's shape - doesn't
+            # show up on any of the plots below, and so the main grid,
+            # the coarse pre-scan, and the ROI polygon all shift by the
+            # exact same amount and stay mutually consistent rather
+            # than each floating to its own independent center.
+            x_offset = self._offset(positions_x, prescan_x, roi_polygon_x)
+            y_offset = self._offset(positions_y, prescan_y, roi_polygon_y)
+            if positions_x is not None:
+                positions_x = positions_x - x_offset
+            if positions_y is not None:
+                positions_y = positions_y - y_offset
+            if prescan_x is not None:
+                prescan_x = prescan_x - x_offset
+            if prescan_y is not None:
+                prescan_y = prescan_y - y_offset
+            if roi_polygon_x is not None:
+                roi_polygon_x = roi_polygon_x - x_offset
+            if roi_polygon_y is not None:
+                roi_polygon_y = roi_polygon_y - y_offset
+
             # The coarse pre-scan's own genuinely sampled (x, y) grid -
             # the real, physically probed locations "used in coarse-
             # grain mode to find a surface". Only present on files
@@ -53,7 +82,7 @@ class SurfaceExport(object):
             # resolution (often hundreds of points), not the coarse
             # pre-scan's own handful of actually measured columns.
             self._export_prescan_points(
-                data.get('prescan_x'), data.get('prescan_y'),
+                prescan_x, prescan_y,
                 data.get('prescan_found_mask'), data.get('prescan_z'),
                 plot_path / f"{filename_base}_prescan_points.png",
             )
@@ -78,16 +107,22 @@ class SurfaceExport(object):
                 # info at all) is left as a genuine gap - bmlab does
                 # not fill it in.
                 z_surface_masked = np.where(found_mask > 0, z_surface, np.nan)
+                # Centered on the grid's own mean rather than left as
+                # the absolute stage z (a large coordinate that carries
+                # no information about the surface's shape) - used
+                # identically for the 2D map and the 3D plot below, so
+                # both show the exact same measurement, just in 2D/3D.
+                z_relative = z_surface_masked - np.nanmean(z_surface_masked)
                 z_offset = data.get('surface_z_offset_um_used') or 0.0
                 title = 'Surface z used for acquisition'
                 if z_offset:
-                    title += f' (+{z_offset:g} $\\mu$m offset)'
+                    title += f', +{z_offset:g} $\\mu$m offset'
                 self._export_grid_map(
                     positions_x[0, :, :] if positions_x is not None
                     else None,
                     positions_y[0, :, :] if positions_y is not None
                     else None,
-                    z_surface_masked,
+                    z_relative,
                     plot_path / f"{filename_base}_z_surface.png",
                     title,
                 )
@@ -95,8 +130,9 @@ class SurfaceExport(object):
                 if positions_x is not None and positions_y is not None:
                     self._export_surface_3d(
                         positions_x[0, :, :], positions_y[0, :, :],
-                        z_surface_masked,
+                        z_relative,
                         plot_path / f"{filename_base}_3d.png",
+                        title,
                     )
 
             if positions_x is not None and positions_y is not None:
@@ -109,7 +145,7 @@ class SurfaceExport(object):
                 )
 
             self._export_roi_polygon(
-                data.get('roi_polygon_x'), data.get('roi_polygon_y'),
+                roi_polygon_x, roi_polygon_y,
                 plot_path / f"{filename_base}_roi_polygon.png",
             )
 
@@ -125,6 +161,21 @@ class SurfaceExport(object):
             json_filename = export_path / f"{filename_base}_metrics.json"
             with open(json_filename, 'w') as f:
                 json.dump(metrics, f, indent=2, default=_json_default)
+
+    @staticmethod
+    def _offset(*arrays):
+        """
+        The mean of the first array that actually has finite values,
+        to center a set of related (x or y) coordinate arrays on one
+        shared reference point - see the centering comment in
+        export(). Falls back to 0.0 (no centering) if none of the
+        candidates has any data at all.
+        """
+        for array in arrays:
+            if array is not None and np.size(array) \
+                    and np.isfinite(array).any():
+                return float(np.nanmean(array))
+        return 0.0
 
     def _plot_path(self):
         if self.file.path.parent.name == 'RawData':
@@ -184,6 +235,11 @@ class SurfaceExport(object):
         ax.set_ylabel('$y$ [$\\mu$m]')
         ax.set_title('Coarse pre-scan surface points')
         ax.axis('equal')
+        # Stage +x/+y point opposite to how the sample appears to move
+        # in the BF images - flip both axes so this plot's orientation
+        # (up/down and left/right) matches them.
+        ax.invert_xaxis()
+        ax.invert_yaxis()
         ax.legend(loc='best', fontsize='small')
         fig.colorbar(sc)
         fig.tight_layout()
@@ -207,6 +263,9 @@ class SurfaceExport(object):
         ax.set_ylabel('$y$ [$\\mu$m]')
         ax.set_title(title)
         ax.set_aspect('equal')
+        # Match the BF images' orientation - see _export_prescan_points.
+        ax.invert_xaxis()
+        ax.invert_yaxis()
         fig.colorbar(im)
         fig.tight_layout()
         fig.savefig(filename, bbox_inches='tight')
@@ -234,45 +293,68 @@ class SurfaceExport(object):
         ax.set_ylabel('$y$ [$\\mu$m]')
         ax.set_title('ROI polygon (as drawn at acquisition time)')
         ax.axis('equal')
+        # Match the BF images' orientation - see _export_prescan_points.
+        ax.invert_xaxis()
+        ax.invert_yaxis()
         fig.tight_layout()
         fig.savefig(filename, bbox_inches='tight')
 
     @staticmethod
-    def _export_surface_3d(x, y, z, filename):
+    def _export_surface_3d(x, y, z, filename, title):
         """
         Renders the surface (exactly as BrillouinAcquisition computed
-        and used it - no bmlab-side gap-filling, holes stay holes) as
-        an actual 3D surface, to show its curvature - x/y in stage um,
-        z as height relative to its own mean (the absolute z is
-        normally a large stage coordinate that would dwarf the height
-        variation on a plot with equal axis scaling). The x/y/z axes
-        are boxed to their true relative physical proportions (real
-        um extents, not independently auto-scaled to fill the plot) -
-        a genuinely flat sample will look flat, not exaggerated.
+        and used it - no bmlab-side gap-filling, holes stay holes;
+        `z` is the same zero-mean-centered measurement as the 2D
+        z-surface map, just shown in 3D instead) as an actual 3D
+        surface - x/y in stage um, kept at their true relative
+        physical proportions so the outline of the scanned area is
+        shape-correct. z is deliberately NOT scaled to its own
+        physical range: that range is normally tiny compared to the
+        x/y extent (a few um of height variation over a scan area
+        hundreds of um wide), which would flatten any real surface
+        into a barely visible sliver. Instead the z axis is stretched
+        to the larger of the x/y extents - as tall as a box aspect
+        can make it without exceeding the plot's own x/y footprint -
+        so height variation stays visible regardless of scan size.
         """
         if x is None or y is None or z is None or not np.isfinite(z).any():
             return
         fig = Figure()
         FigureCanvasAgg(fig)
         ax = fig.add_subplot(111, projection='3d')
-        z_relative = z - np.nanmean(z)
+        # plot_surface colors each flat quad from its own corner values
+        # (by default, the mean of all 4) rather than the colormap's
+        # data-wide min/max, so its auto clim can come out far
+        # narrower than the data's actual range - explicit vmin/vmax
+        # keeps the color scale (and colorbar) honest and matching the
+        # 2D map's, even though individual quads are still one flat
+        # color rather than exact per-point ones.
         surf = ax.plot_surface(
-            x, y, z_relative, cmap='viridis', linewidth=0,
-            antialiased=True)
+            x, y, z, cmap='viridis', linewidth=0, antialiased=True,
+            vmin=np.nanmin(z), vmax=np.nanmax(z))
         ax.set_xlabel('$x$ [$\\mu$m]')
         ax.set_ylabel('$y$ [$\\mu$m]')
         ax.set_zlabel('$\\Delta z$ [$\\mu$m] (relative to mean)')
-        ax.set_title('Surface curvature')
+        ax.set_title(title)
 
-        # True physical aspect ratio - a tiny minimum floor guards
-        # against a degenerate (zero-extent) axis, e.g. a 1D scan.
+        # x/y keep their true relative physical proportions; z is
+        # exaggerated to the larger of the two (see docstring) - a
+        # tiny minimum floor guards against a degenerate (zero-extent)
+        # axis, e.g. a 1D scan.
         x_range = max(np.nanmax(x) - np.nanmin(x), 1e-9)
         y_range = max(np.nanmax(y) - np.nanmin(y), 1e-9)
-        z_range = max(
-            np.nanmax(z_relative) - np.nanmin(z_relative), 1e-9)
-        ax.set_box_aspect((x_range, y_range, z_range))
+        ax.set_box_aspect((x_range, y_range, max(x_range, y_range)))
 
-        fig.colorbar(surf, shrink=0.6)
+        # Match the BF images' orientation - see _export_prescan_points.
+        ax.invert_xaxis()
+        ax.invert_yaxis()
+
+        # Extra pad, and its own title rather than relying on default
+        # placement: fig.colorbar()'s default pad sits right where
+        # mpl3d draws the z-axis and its tick labels, so without this
+        # the colorbar visually overlaps/hides the z-axis labeling.
+        colorbar = fig.colorbar(surf, shrink=0.6, pad=0.15)
+        colorbar.ax.set_title('$\\Delta z$ [$\\mu$m]', fontsize='small')
         fig.tight_layout()
         fig.savefig(filename, bbox_inches='tight')
 

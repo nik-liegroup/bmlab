@@ -38,6 +38,33 @@ def test_run_pipeline():
     np.testing.assert_allclose(shift, 5.03e9, atol=50E6)
 
 
+def test_run_pipeline_sets_quality_diagnostics():
+    """
+    Regression test: the full evaluate() pipeline (real spectra, not a
+    hand-built results array) must populate brillouin_peak_snr/_nrmse/
+    _center_uncertainty and their rayleigh_ equivalents with real,
+    finite values - not leave them at their initialize_results_arrays()
+    NaN default. See bmlab.fits._fit_noise_and_covariance()/
+    _param_uncertainty() and EvaluationController.evaluate().
+    """
+    session = run_pipeline()
+    evm = session.evaluation_model()
+
+    for key in ('brillouin_peak_snr', 'brillouin_peak_nrmse',
+                'brillouin_peak_center_uncertainty',
+                'rayleigh_peak_snr', 'rayleigh_peak_nrmse',
+                'rayleigh_peak_center_uncertainty'):
+        data = evm.results[key]
+        assert data.size != 0
+        finite = data[~np.isnan(data)]
+        assert finite.size > 0, f'{key} is all-NaN'
+        assert np.all(finite >= 0), f'{key} has a negative value'
+
+    # Water.h5 is a clean, strong single spectrum - SNR should be well
+    # above the noise floor.
+    assert np.nanmedian(evm.results['brillouin_peak_snr']) > 1
+
+
 def test_run_pipeline_with_missing_first_image_key():
     """
     Regression test: a surface-following / ROI scan can skip the

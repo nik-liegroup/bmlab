@@ -1,3 +1,20 @@
+## 0.13.0 - 2026-09-10
+### Added
+- feat(evaluation): fit-quality diagnostics (SNR, NRMSE, peak-center
+  uncertainty) and frame-to-frame reproducibility, with configurable
+  pass/fail thresholds (`EvaluationModel.quality_thresholds`,
+  `get_default_quality_thresholds()`)
+- feat(export): combine all Brillouin parameters into one CSV per
+  repetition, with repetition selection and applied quality-threshold
+  metadata
+- feat(export): stage-to-overview-image transform matrix export
+
+### Fixed
+- fix(evaluation): allocate `brillouin_shift_frame_spread`/
+  `rayleigh_shift_frame_spread` results arrays on init, so a default
+  threshold on them doesn't crash before the first evaluation
+- fix(evaluation): remove unused legacy `brillouin_snr` derived value
+
 ## 0.12.3 - 2026-06-23
 ### Fixed
 - fix(fits): ignore NaN values when fitting #201

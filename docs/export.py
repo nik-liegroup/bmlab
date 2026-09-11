@@ -22,7 +22,7 @@ ec = ExportController()
 export_config = ec.get_configuration()
 # Disable exporting fluorescence data
 export_config['fluorescence']['export'] = False
-# Set caxis of Brillouin data
-export_config['brillouin']['brillouin_shift_f']['cax'] = (5.0, 5.8)
+# Only export specific Brillouin repetitions (None exports all of them)
+export_config['brillouin']['repetitions'] = ['0']
 # Export the data
 ec.export(export_config)
