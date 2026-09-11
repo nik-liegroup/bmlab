@@ -415,9 +415,10 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
         'overviewZStack_0_BMrep0_afterAcq_tiled_transform.csv',
         'overviewZStack_1_BMrep0_afterAcq_tiled_transform.csv',
     ]
+    matrices_dir = plots_dir / 'TransformMatrices'
     for transform in transforms:
-        assert os.path.exists(plots_dir / transform)
-        with open(plots_dir / transform) as f:
+        assert os.path.exists(matrices_dir / transform)
+        with open(matrices_dir / transform) as f:
             rows = [line.strip().split(',') for line in f if line.strip()]
         assert len(rows) == 3
         assert all(len(row) == 3 for row in rows)

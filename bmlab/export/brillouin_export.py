@@ -1,9 +1,12 @@
 import csv
+import logging
 import os
 import warnings
 import numpy as np
 
 from bmlab import Session
+
+logger = logging.getLogger(__name__)
 
 
 class BrillouinExport(object):
@@ -139,6 +142,28 @@ class BrillouinExport(object):
                     # Positions don't depend on parameter_key/peak_index -
                     # grab the (un-centered, absolute stage um) grid once.
                     x, y, z = positions
+                if data.size != x.size:
+                    # A repetition whose results were never (re-)computed
+                    # for this key at the current grid size - e.g. never
+                    # evaluated at all (still EvaluationModel.__init__'s
+                    # np.empty((0,)) placeholder - normally caught by
+                    # EvaluationController.get_data()'s own size==0 guard,
+                    # but 'rayleigh_shift' bypasses get_data() entirely,
+                    # see _get_parameter_data()), or evaluated with a
+                    # region/peak count of 0 (nr_brillouin_regions=0 makes
+                    # brillouin_peak_position_f's own shape - and anything
+                    # derived from it - collapse to size 0 too). Either
+                    # way there's nothing real for this column at this
+                    # repetition's points - fill it with NaN at the
+                    # correct shape instead of crashing when it's later
+                    # zipped against the (real, grid-sized) position
+                    # columns.
+                    logger.warning(
+                        "%s repetition %s: '%s%s' has %d values, expected "
+                        "%d (grid size) - exporting it as all-NaN",
+                        self.file.path, brillouin_repetition, parameter_key,
+                        postfix, data.size, x.size)
+                    data = np.full(x.shape, np.nan)
                 # 'F' (x fastest, then y, then z) matches each point's
                 # fixed grid address (see this method's docstring) -
                 # NOT necessarily the real chronological capture order.

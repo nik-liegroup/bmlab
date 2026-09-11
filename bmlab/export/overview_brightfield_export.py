@@ -5,7 +5,8 @@ import numpy as np
 from PIL import Image
 
 from bmlab import Session
-from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL, FLUORESCENCE_GROUP
+from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL, BRIGHTFIELD_CHANNEL, \
+    FLUORESCENCE_GROUP
 from bmlab.export.timing import get_brillouin_windows, classify_timing
 from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
     warp_local, um_offset_to_pixels, get_point_to_pixel_matrix
@@ -38,9 +39,18 @@ class OverviewBrightfieldExport(object):
 
         for repetition_key in fluorescence_repetitions:
             repetition = self.file.get_repetition(repetition_key, self.mode)
-            # Sort by time so slice/tile order reflects acquisition order.
-            image_keys = repetition.payload.image_keys_by_channel(
-                OVERVIEW_BRIGHTFIELD_CHANNEL, sort_by_time=True)
+            # Sort by time so slice/tile order reflects acquisition
+            # order. A single-shot 'before' snapshot (BRIGHTFIELD_
+            # CHANNEL) and a z-stack/tile 'during'/'after' capture
+            # (OVERVIEW_BRIGHTFIELD_CHANNEL) never share one
+            # Fluorescence repetition in practice, but sorting the
+            # combined list by time keeps this correct even if they did.
+            image_keys = sorted(
+                repetition.payload.image_keys_by_channel(
+                    OVERVIEW_BRIGHTFIELD_CHANNEL, sort_by_time=True) +
+                repetition.payload.image_keys_by_channel(
+                    BRIGHTFIELD_CHANNEL, sort_by_time=True),
+                key=lambda key: repetition.payload.get_date(key))
             if not image_keys:
                 continue
 
@@ -313,16 +323,21 @@ class OverviewBrightfieldExport(object):
     def _write_transform_csv(matrix, image_filename):
         """
         Writes the 3x3 matrix mapping an absolute stage position (x, y,
-        um) to its pixel location in `image_filename`'s image, next to
-        it as plain a plain 3-row/3-column CSV (no header) - same
-        layout as BrainFusion's AFM loader already expects for its own
-        GridInversionMatrix.csv. Writes nothing if `matrix` is None (no
-        scale calibration, or no recorded position for this image).
+        um) to its pixel location in `image_filename`'s image, as a
+        plain 3-row/3-column CSV (no header) - same layout as
+        BrainFusion's AFM loader already expects for its own
+        GridInversionMatrix.csv - into a 'TransformMatrices'
+        subfolder next to the image, one per image rather than mixed
+        in among the images themselves. Writes nothing if `matrix` is
+        None (no scale calibration, or no recorded position for this
+        image).
         """
         if matrix is None:
             return
-        csv_filename = image_filename.with_name(
-            image_filename.stem + '_transform.csv')
+        matrix_dir = image_filename.parent / 'TransformMatrices'
+        if not os.path.exists(matrix_dir):
+            os.makedirs(matrix_dir, exist_ok=True)
+        csv_filename = matrix_dir / (image_filename.stem + '_transform.csv')
         with open(csv_filename, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=',')
             writer.writerows(matrix.tolist())
