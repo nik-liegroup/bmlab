@@ -50,6 +50,13 @@ class Crop(Serializer):
         if self.bounds is None or img is None:
             return img
         x_min, x_max, y_min, y_max = self.bounds
+        # Clamp the lower bounds too, not just the upper ones - a
+        # negative x_min/y_min would otherwise silently trigger numpy's
+        # negative-index wraparound (counting from the end of the
+        # array) instead of erroring or clipping to 0, producing a
+        # wrong crop with no indication anything went wrong.
+        x_min = max(x_min, 0)
+        y_min = max(y_min, 0)
         if img.ndim == 2:
             x_max = min(x_max, img.shape[0])
             y_max = min(y_max, img.shape[1])

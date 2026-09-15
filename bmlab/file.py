@@ -32,6 +32,16 @@ OVERVIEW_BRIGHTFIELD_CHANNEL = 'Brightfield z overview'
 # "during"/"after" ones.
 BRIGHTFIELD_CHANNEL = 'Brightfield'
 
+# Channel name for a brightfield image captured alongside an
+# individual Brillouin measurement point (one per point, or one per
+# every Nth point - see Brillouin::capturePerPointBrightfieldImage()),
+# as opposed to OVERVIEW_BRIGHTFIELD_CHANNEL's per-z-plane overview
+# capture. Both its position and stage-position attributes are
+# already converted into the same grid frame as the Brillouin
+# measurement grid's own positions-x/y/z, exactly like the overview
+# channels above.
+PER_POINT_BRIGHTFIELD_CHANNEL = 'Brightfield per-point'
+
 
 def _get_datetime(time_stamp):
     """ Convert the time stamp in the HDF file to Python datetime """
@@ -530,6 +540,30 @@ class Payload(MeasurementData):
         'prescan_z': 'positions-surface-prescan-z-um',
         'prescan_metric': 'positions-surface-prescan-metric',
     }
+    # The full (z, metric) drop curve behind each pre-scan column,
+    # not just prescan_z/prescan_metric's single found/last-measured
+    # value - every sample actually taken while searching that column
+    # (seed, rewind, forward walk, verification), in measurement
+    # order. 'curve_z'/'curve_metric' are rank-3, shape (len(
+    # prescan_x), len(prescan_y), max_samples), NaN-padded past each
+    # column's own 'curve_sample_counts' (a column's real samples
+    # always come first). Only present alongside prescan_x/prescan_y,
+    # and only if at least one sample was ever recorded.
+    SURFACE_SCAN_CURVES = {
+        'curve_z': 'positions-surface-curve-z-um',
+        'curve_metric': 'positions-surface-curve-metric',
+        'curve_sample_counts': 'positions-surface-curve-sample-counts',
+    }
+    # Extra boundary points that found a surface, requested outside
+    # the regular coarse pre-scan grid - a flat list (not a grid,
+    # unlike SURFACE_PRESCAN_MASKS), in the same grid frame as
+    # roi_polygon_x/y. Absent entirely if none were requested or none
+    # of the requested ones found a surface.
+    SURFACE_SCAN_BOUNDARY = {
+        'boundary_x': 'positions-surface-prescan-boundary-x-um',
+        'boundary_y': 'positions-surface-prescan-boundary-y-um',
+        'boundary_z': 'positions-surface-prescan-boundary-z-um',
+    }
     SURFACE_SCAN_SETTINGS = {
         'surface_follow_used': 'positions-surface-follow-used',
         'surface_drop_fraction_used':
@@ -640,12 +674,24 @@ class Payload(MeasurementData):
         x_grid = self.positions['x'][0, :, 0]
         y_grid = self.positions['y'][0, 0, :]
 
+        # Explicit, tiny absolute tolerance rather than np.isclose()'s
+        # default (which also scales with the values' own magnitude via
+        # rtol) - in absolute-grid-coordinates mode, x/y can carry a
+        # large stage-origin offset baked in, where the default rtol
+        # would loosen to a fraction of a micron and risk conflating
+        # two genuinely distinct, closely-spaced grid columns. 1e-3 um
+        # is far below any real grid spacing yet far above float64
+        # rounding noise at typical stage-position magnitudes.
+        tolerance = 1e-3
+
         for ix in range(nx):
-            x_match = np.isclose(sampled_x, x_grid[ix])
+            x_match = np.isclose(
+                sampled_x, x_grid[ix], atol=tolerance, rtol=0)
             if not np.any(x_match):
                 continue
             for iy in range(ny):
-                mask = x_match & np.isclose(sampled_y, y_grid[iy])
+                mask = x_match & np.isclose(
+                    sampled_y, y_grid[iy], atol=tolerance, rtol=0)
                 if not np.any(mask):
                     continue
                 zs = np.sort(sampled_z[mask])
@@ -692,6 +738,19 @@ class Payload(MeasurementData):
                 ndarray[len(prescan_x), len(prescan_y)], the pre-
                 scan's own result at its own (coarse) resolution -
                 only present alongside prescan_x/prescan_y
+            'curve_z'/'curve_metric': ndarray[len(prescan_x),
+                len(prescan_y), max_samples], the full drop curve
+                sampled at each pre-scan column, NaN-padded past
+                'curve_sample_counts' - only present alongside
+                prescan_x/prescan_y, and only on files new enough to
+                record it (see SURFACE_SCAN_CURVES)
+            'curve_sample_counts': ndarray[len(prescan_x),
+                len(prescan_y)], the real (non-padding) sample count
+                for each column's curve_z/curve_metric row
+            'boundary_x'/'boundary_y'/'boundary_z': ndarray, extra
+                boundary points that found a surface, requested
+                outside the regular coarse pre-scan grid - a flat
+                list, not a grid (see SURFACE_SCAN_BOUNDARY)
             plus the scalar settings listed in SURFACE_SCAN_SETTINGS
         """
         if not self.has_surface_scan():
@@ -703,12 +762,18 @@ class Payload(MeasurementData):
         for key, dataset_name in self.SURFACE_SCAN_PATH.items():
             ds = self.group.get(dataset_name)
             data[key] = np.array(ds) if ds is not None else None
+        for key, dataset_name in self.SURFACE_SCAN_BOUNDARY.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds) if ds is not None else None
         # Only meaningful together with prescan_x/prescan_y (absent on
         # older files) - skip entirely rather than returning arrays
         # with no coordinates to plot them against.
         if data.get('prescan_x') is not None \
                 and data.get('prescan_y') is not None:
             for key, dataset_name in self.SURFACE_PRESCAN_MASKS.items():
+                ds = self.group.get(dataset_name)
+                data[key] = np.array(ds) if ds is not None else None
+            for key, dataset_name in self.SURFACE_SCAN_CURVES.items():
                 ds = self.group.get(dataset_name)
                 data[key] = np.array(ds) if ds is not None else None
         for key, dataset_name in self.SURFACE_SCAN_SETTINGS.items():
@@ -790,23 +855,81 @@ class Payload(MeasurementData):
         positions['tile_count'] = total_per_z
         return positions
 
-    def get_scale_calibration(self):
-        parameters = [
-            'micrometerToPixX', 'micrometerToPixY',
-            'pixToMicrometerX', 'pixToMicrometerY',
-            'positionScanner', 'positionStage', 'origin'
-        ]
-        try:
-            cal = self.group.get('scaleCalibration')
-            scaleCal = dict()
-            for attribute in parameters:
-                val = cal.get(attribute)
-                scaleCal[attribute] = \
-                    tuple(val.attrs.get(dim)[0] for dim in ['x', 'y'])
+    # Keys of get_scale_calibration()'s return value that are
+    # point-style (an (x, y) tuple, or None if missing) rather than a
+    # plain scalar - so a caller that needs to serialize the dict
+    # (e.g. BrillouinExport's CSV header) can tell the two apart
+    # without relying on isinstance() (which can't distinguish a
+    # missing point-style value, itself None, from a missing scalar).
+    SCALE_CALIBRATION_POINT_KEYS = {
+        'micrometerToPixX', 'micrometerToPixY',
+        'pixToMicrometerX', 'pixToMicrometerY',
+        'positionScanner', 'positionStage', 'origin', 'fovOffset',
+    }
 
-            return scaleCal
-        except BaseException:
+    def get_scale_calibration(self):
+        """
+        Returns the scale-calibration parameters recorded for this
+        payload, or None if this payload has no scaleCalibration group
+        at all.
+
+        Besides the original point-style parameters (each an (x, y)
+        tuple), newer files also carry per-objective context:
+        'objectiveSlot', 'objectiveName', 'magnification',
+        'referenceObjectiveName', 'hasFovOffset', 'fovOffset' ((x, y),
+        um), 'fovOffsetSigmaUm' and 'missingOffsetAccepted'. Each of
+        these degrades independently to None if missing (e.g. an
+        older file predating the per-objective FOV-offset feature)
+        rather than discarding an otherwise-usable calibration - only
+        the group's total absence returns None outright.
+        """
+        cal = self.group.get('scaleCalibration') \
+            if self.group is not None else None
+        if cal is None:
             return None
+
+        def point(name):
+            try:
+                val = cal.get(name)
+                return tuple(val.attrs.get(dim)[0] for dim in ['x', 'y'])
+            except BaseException:
+                return None
+
+        def scalar(name, decode=False):
+            try:
+                val = cal.attrs.get(name)
+                if val is None:
+                    return None
+                val = val[0]
+                return val.decode('utf-8') if decode else val
+            except BaseException:
+                return None
+
+        scaleCal = dict()
+        for attribute in [
+                'micrometerToPixX', 'micrometerToPixY',
+                'pixToMicrometerX', 'pixToMicrometerY',
+                'positionScanner', 'positionStage', 'origin']:
+            scaleCal[attribute] = point(attribute)
+
+        scaleCal['objectiveSlot'] = scalar('objectiveSlot')
+        scaleCal['objectiveName'] = scalar('objectiveName', decode=True)
+        scaleCal['magnification'] = scalar('magnification')
+        scaleCal['referenceObjectiveName'] = \
+            scalar('referenceObjectiveName', decode=True)
+        has_fov_offset = scalar('hasFovOffset')
+        scaleCal['hasFovOffset'] = \
+            bool(has_fov_offset) if has_fov_offset is not None else None
+        scaleCal['fovOffset'] = point('fovOffset')
+        # Note: written to the file as "fovOffsetSigma", not
+        # "fovOffsetSigmaUm" - see H5BM::setScaleCalibration().
+        scaleCal['fovOffsetSigmaUm'] = scalar('fovOffsetSigma')
+        missing_offset_accepted = scalar('missingOffsetAccepted')
+        scaleCal['missingOffsetAccepted'] = \
+            bool(missing_offset_accepted) \
+            if missing_offset_accepted is not None else None
+
+        return scaleCal
 
 
 class Calibration(MeasurementData):

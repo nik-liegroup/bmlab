@@ -467,6 +467,13 @@ class EvaluationModel(Serializer):
             shape_rayleigh)
         self.results['rayleigh_shift_frame_spread'][:] = np.nan
 
+        # Quality-threshold pass/fail mask, only ever (re-)populated by
+        # apply_quality_thresholds(). Reset it here too so a re-evaluate
+        # cannot leave a stale mask from a previous fit lying around -
+        # callers must explicitly re-apply thresholds after evaluating
+        # before the mask (and anything exported from it) is valid again.
+        self.results['quality_pass'] = np.full(shape_general, np.nan)
+
     def set_spectra(self, image_key, spectra):
         self.spectra[image_key] = spectra
 

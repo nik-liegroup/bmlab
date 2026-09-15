@@ -6,7 +6,8 @@ from bmlab import Session
 from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL
 from bmlab.export.timing import get_brillouin_windows, classify_timing, \
     sanitize_for_filename
-from bmlab.export.alignment import get_tmatrix, warp_local
+from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
+    warp_local, get_point_to_pixel_matrix, write_transform_csv
 
 
 class FluorescenceExport(object):
@@ -69,6 +70,7 @@ class FluorescenceExport(object):
             # Get the scale calibration
             scale_calibration = repetition.payload.get_scale_calibration()
             tmatrix = get_tmatrix(scale_calibration)
+            pixels_per_um = get_pixels_per_um(scale_calibration)
 
             # Loop over all images in this repetition
             for image_key in image_keys:
@@ -82,8 +84,7 @@ class FluorescenceExport(object):
                 img_data = repetition.payload.get_image(image_key)
 
                 # Average all images acquired if grayscale
-                image_class = (repetition.payload
-                               .get_class(image_key).casefold())
+                image_class = repetition.payload.get_class(image_key)
                 if (image_class and image_class.casefold()
                         == 'image_grayscale'):
                     img_data = np.nanmean(img_data, axis=0).astype(np.ubyte)
@@ -132,7 +133,8 @@ class FluorescenceExport(object):
 
                 # Warp the image to align with a standard x-y
                 # coordinate system
-                image_data_warped, _, _ = warp_local(img_data, tmatrix)
+                image_data_warped, _, translate = \
+                    warp_local(img_data, tmatrix)
 
                 # Export image with proper alpha channel
                 image_warped = build_image(
@@ -146,3 +148,28 @@ class FluorescenceExport(object):
 
                 filename = path / f"{channel_tag}{timing_part}.png"
                 image_warped.save(filename)
+
+                # Most regular Fluorescence-mode images are a single-
+                # point capture with no separate read-back stage
+                # position to prefer (see Payload.get_stage_position()'s
+                # own docstring) - get_position() is their actual
+                # capture position. The "Brightfield per-point" channel
+                # is the exception: like the brightfield overview
+                # images, it does carry a read-back stage position,
+                # which can differ slightly from the target due to
+                # hysteresis/backlash, so prefer it here too - falling
+                # back to get_position() for every other channel, where
+                # get_stage_position() is simply None. Write the same
+                # stage-position -> pixel transform matrix
+                # OverviewBrightfieldExport writes for its own images,
+                # so this image can be placed relative to the Brillouin
+                # CSV grid or an overview image using the same
+                # [col, row, 1] = M @ [x_um, y_um, 1] mapping.
+                position = repetition.payload.get_stage_position(image_key) \
+                    or repetition.payload.get_position(image_key)
+                anchor_um = (position['x'], position['y']) \
+                    if position is not None else None
+                matrix = get_point_to_pixel_matrix(
+                    tmatrix, pixels_per_um, anchor_um, img_data.shape,
+                    translate)
+                write_transform_csv(matrix, filename)

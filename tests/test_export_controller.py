@@ -6,6 +6,7 @@ import shutil
 import uuid
 import os
 
+import h5py
 import numpy as np
 
 from bmlab.session import Session
@@ -64,6 +65,75 @@ def test_export_fluorescence(tmp_dir):
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
+
+
+def test_export_fluorescence_transform_matrix(tmp_dir):
+    """
+    Regression test: FluorescenceExport/FluorescenceCombinedExport must
+    write a stage-position -> pixel transform matrix for every aligned
+    image they export (see bmlab.export.alignment.write_transform_csv()
+    - same layout as OverviewBrightfieldExport already writes for its
+    own images), so a fluorescence image can actually be placed
+    relative to the Brillouin CSV grid or an overview image. Without
+    it there is no way to overlay a fluorescence image with anything
+    else exported. Fluorescence.h5 itself carries no recorded per-image
+    position - this test adds one directly (mimicking what a real
+    BrillouinAcquisition capture writes) to exercise that path.
+    """
+    shutil.copy(
+        data_file_path('Fluorescence.h5'), Path.cwd() / 'Fluorescence.h5')
+
+    with h5py.File(Path.cwd() / 'Fluorescence.h5', 'r+') as f:
+        for rep in ('0', '1'):
+            for idx in range(4):
+                ds = f[f'Fluorescence/{rep}/payload/data/{idx}']
+                ds.attrs['position_x_um'] = np.array([100.0 + int(rep)])
+                ds.attrs['position_y_um'] = np.array([50.0])
+                ds.attrs['position_z_um'] = np.array([0.0])
+
+    session = Session.get_instance()
+    session.set_file(Path('Fluorescence.h5'))
+
+    ec = ExportController()
+    config = ec.get_configuration()
+    config['brillouin']['export'] = False
+    ec.export(config)
+
+    session.clear()
+
+    plots_dir = tmp_dir.parent / 'Plots'
+    transform_dir = plots_dir / 'TransformMatrices'
+    assert transform_dir.is_dir()
+
+    def assert_valid_matrix(csv_path):
+        assert csv_path.exists()
+        with open(csv_path, newline='') as f:
+            rows = list(csv.reader(f))
+        matrix = np.array(rows, dtype=float)
+        assert matrix.shape == (3, 3)
+        assert matrix[2].tolist() == [0.0, 0.0, 1.0]
+        return matrix
+
+    for image in ('Blue_FLrep0.png', 'Green_FLrep0.png', 'Red_FLrep0.png',
+                  'Brightfield_FLrep0.png'):
+        assert_valid_matrix(
+            transform_dir / (Path(image).stem + '_transform.csv'))
+
+    # Both repetitions were given a different x position (see above) -
+    # their transform matrices must actually differ, not just both
+    # happen to exist.
+    matrix_rep0 = assert_valid_matrix(
+        transform_dir / 'Blue_FLrep0_transform.csv')
+    matrix_rep1 = assert_valid_matrix(
+        transform_dir / 'Blue_FLrep1_transform.csv')
+    assert not np.allclose(matrix_rep0, matrix_rep1)
+
+    combined_transform_dir = \
+        tmp_dir.parent / 'Plots' / 'Bare' / 'TransformMatrices'
+    assert combined_transform_dir.is_dir()
+    assert_valid_matrix(
+        combined_transform_dir /
+        'fluorescenceCombined_rgb_FLrep0_transform.csv')
 
 
 def test_export_color_images(tmp_dir):

@@ -1,4 +1,3 @@
-import csv
 import os
 
 import numpy as np
@@ -9,7 +8,8 @@ from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL, BRIGHTFIELD_CHANNEL, \
     FLUORESCENCE_GROUP
 from bmlab.export.timing import get_brillouin_windows, classify_timing
 from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
-    warp_local, um_offset_to_pixels, get_point_to_pixel_matrix
+    warp_local, um_offset_to_pixels, get_point_to_pixel_matrix, \
+    write_transform_csv
 
 # Two tile/z positions closer than this (um) are treated as "the same
 # point" - generous enough to absorb float noise and hysteresis-
@@ -106,8 +106,16 @@ class OverviewBrightfieldExport(object):
                 # the common case), so per-image position attributes -
                 # which may be missing entirely on older files - are
                 # not needed for tile placement, only warp_local() is.
+                # Prefer the actual read-back stage position over the
+                # target one (see Payload.get_stage_position()'s own
+                # docstring: hysteresis compensation/backlash can move
+                # these apart) so the transform matrix anchors on where
+                # the image was really captured - falling back to the
+                # target position for older files that never recorded
+                # the read-back value.
                 positions = [
-                    repetition.payload.get_position(key)
+                    repetition.payload.get_stage_position(key)
+                    or repetition.payload.get_position(key)
                     for key in image_keys]
                 self._export_group(
                     repetition, image_keys, positions, tmatrix,
@@ -222,7 +230,7 @@ class OverviewBrightfieldExport(object):
         matrix = get_point_to_pixel_matrix(
             tmatrix, pixels_per_um, anchor_um, anchor_shape,
             anchor_translate)
-        self._write_transform_csv(matrix, filename)
+        write_transform_csv(matrix, filename)
 
     def _export_tiled(
             self, repetition, image_keys, positions, tiles, tmatrix,
@@ -297,7 +305,7 @@ class OverviewBrightfieldExport(object):
             matrix = get_point_to_pixel_matrix(
                 tmatrix, pixels_per_um, reference_xy, anchor_shape,
                 anchor_translate, placement_offset_px=(-min_x, -min_y))
-        self._write_transform_csv(matrix, filename)
+        write_transform_csv(matrix, filename)
 
     @staticmethod
     def _compose_mosaic(warped_tiles):
@@ -318,29 +326,6 @@ class OverviewBrightfieldExport(object):
             empty = np.isnan(region)
             region[empty] = warped[:region.shape[0], :region.shape[1]][empty]
         return canvas, min_x, min_y
-
-    @staticmethod
-    def _write_transform_csv(matrix, image_filename):
-        """
-        Writes the 3x3 matrix mapping an absolute stage position (x, y,
-        um) to its pixel location in `image_filename`'s image, as a
-        plain 3-row/3-column CSV (no header) - same layout as
-        BrainFusion's AFM loader already expects for its own
-        GridInversionMatrix.csv - into a 'TransformMatrices'
-        subfolder next to the image, one per image rather than mixed
-        in among the images themselves. Writes nothing if `matrix` is
-        None (no scale calibration, or no recorded position for this
-        image).
-        """
-        if matrix is None:
-            return
-        matrix_dir = image_filename.parent / 'TransformMatrices'
-        if not os.path.exists(matrix_dir):
-            os.makedirs(matrix_dir, exist_ok=True)
-        csv_filename = matrix_dir / (image_filename.stem + '_transform.csv')
-        with open(csv_filename, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile, delimiter=',')
-            writer.writerows(matrix.tolist())
 
     def _plot_path(self):
         if self.file.path.parent.name == 'RawData':

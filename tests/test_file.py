@@ -533,5 +533,16 @@ def test_file_get_scale_calibration():
         'pixToMicrometerY': (0.0612482986583706, 0.05152634649037527),
         'positionScanner': (0.0, 0.0),
         'positionStage': (0.0, 0.0),
-        'origin': (0.0, 0.0)
+        'origin': (0.0, 0.0),
+        # This fixture predates the per-objective FOV-offset fields -
+        # each degrades independently to None (see
+        # Payload.get_scale_calibration()).
+        'objectiveSlot': None,
+        'objectiveName': None,
+        'magnification': None,
+        'referenceObjectiveName': None,
+        'hasFovOffset': None,
+        'fovOffset': None,
+        'fovOffsetSigmaUm': None,
+        'missingOffsetAccepted': None,
     })

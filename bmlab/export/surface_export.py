@@ -87,6 +87,14 @@ class SurfaceExport(object):
                 plot_path / f"{filename_base}_prescan_points.png",
             )
 
+            self._export_surface_curves(
+                data.get('curve_z'), data.get('curve_metric'),
+                data.get('curve_sample_counts'),
+                data.get('surface_medium_reference_value_used'),
+                data.get('surface_reference_threshold'),
+                plot_path / f"{filename_base}_drop_curves.png",
+            )
+
             if found_mask is not None and positions_z is not None:
                 # BrillouinAcquisition writes one z-target per (x, y)
                 # into positions-z (the same value at every z-index of
@@ -246,6 +254,64 @@ class SurfaceExport(object):
         fig.savefig(filename, bbox_inches='tight')
 
     @staticmethod
+    def _export_surface_curves(
+            curve_z, curve_metric, curve_sample_counts,
+            base_value, threshold_value, filename):
+        """
+        Plots every coarse pre-scan column's own full (z, metric) drop
+        curve on one shared plot - x = z, y = metric - so the curves
+        can be compared directly against each other and against the
+        medium-reference "base" value and the drop threshold actually
+        used (each drawn as its own horizontal reference line), rather
+        than only seeing the single found/last-measured point
+        prescan_z/prescan_metric keep. Each column is trimmed to its
+        own curve_sample_counts (real samples always come first, see
+        Payload.SURFACE_SCAN_CURVES) and sorted by z so a column
+        sampled out of order (seed, rewind, forward walk,
+        verification) still draws as a clean line.
+        """
+        if curve_z is None or curve_metric is None \
+                or curve_sample_counts is None:
+            return
+        nx, ny = curve_sample_counts.shape
+        fig = Figure(figsize=(6.4, 5.2))
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        plotted = False
+        for ix in range(nx):
+            for iy in range(ny):
+                n = int(curve_sample_counts[ix, iy])
+                if n <= 0:
+                    continue
+                z = curve_z[ix, iy, :n]
+                metric = curve_metric[ix, iy, :n]
+                valid = np.isfinite(z) & np.isfinite(metric)
+                if not np.any(valid):
+                    continue
+                order = np.argsort(z[valid])
+                ax.plot(
+                    z[valid][order], metric[valid][order],
+                    '-', linewidth=0.8, alpha=0.6)
+                plotted = True
+        if not plotted:
+            return
+        if base_value is not None:
+            ax.axhline(
+                base_value, color='tab:green', linestyle='--',
+                linewidth=1.5, label='medium reference (base)')
+        if threshold_value is not None:
+            ax.axhline(
+                threshold_value, color='tab:red', linestyle='--',
+                linewidth=1.5, label='drop threshold')
+        ax.set_xlabel('$z$ [$\\mu$m]')
+        ax.set_ylabel('metric')
+        ax.set_title('Surface pre-scan drop curves (all columns)')
+        if base_value is not None or threshold_value is not None:
+            ax.legend(loc='best', fontsize='small')
+        fig.tight_layout()
+        fig.savefig(filename, bbox_inches='tight')
+
+    @staticmethod
     def _export_grid_map(x, y, z, filename, title, vmin=None, vmax=None):
         """
         Plots a 2D grid quantity `z` at its true (x, y) stage
@@ -284,10 +350,11 @@ class SurfaceExport(object):
         fig = Figure()
         FigureCanvasAgg(fig)
         ax = fig.add_subplot(111)
-        # Close the polygon for display, whether or not it was
-        # already stored closed.
-        x_closed = np.append(x, x[0])
-        y_closed = np.append(y, y[0])
+        # Close the polygon for display, unless it was already stored
+        # closed (would otherwise duplicate the closing vertex).
+        already_closed = x.size > 1 and x[0] == x[-1] and y[0] == y[-1]
+        x_closed = x if already_closed else np.append(x, x[0])
+        y_closed = y if already_closed else np.append(y, y[0])
         ax.plot(x_closed, y_closed, '-o', markersize=3)
         ax.set_xlabel('$x$ [$\\mu$m]')
         ax.set_ylabel('$y$ [$\\mu$m]')
