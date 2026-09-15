@@ -1,3 +1,6 @@
+import csv
+import os
+
 import numpy as np
 from skimage import transform
 
@@ -165,3 +168,28 @@ def get_point_to_pixel_matrix(tmatrix, pixels_per_um, anchor_um, image_shape,
         [linear[1, 0], linear[1, 1], translation[1]],
         [0, 0, 1],
     ])
+
+
+def write_transform_csv(matrix, image_filename):
+    """
+    Writes the 3x3 matrix (see get_point_to_pixel_matrix()) mapping an
+    absolute stage position (x, y, um) to its pixel location in
+    `image_filename`'s image, as a plain 3-row/3-column CSV (no
+    header) - same layout as BrainFusion's AFM loader already expects
+    for its own GridInversionMatrix.csv - into a 'TransformMatrices'
+    subfolder next to the image, one per image rather than mixed in
+    among the images themselves. Writes nothing if `matrix` is None
+    (no scale calibration, or no recorded position for this image) -
+    shared by every exporter that places an image in the stage frame
+    (OverviewBrightfieldExport, FluorescenceExport,
+    FluorescenceCombinedExport), so they all agree on this layout.
+    """
+    if matrix is None:
+        return
+    matrix_dir = image_filename.parent / 'TransformMatrices'
+    if not os.path.exists(matrix_dir):
+        os.makedirs(matrix_dir, exist_ok=True)
+    csv_filename = matrix_dir / (image_filename.stem + '_transform.csv')
+    with open(csv_filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile, delimiter=',')
+        writer.writerows(matrix.tolist())

@@ -497,8 +497,10 @@ def fit_lorentz_region(region, xdata, ydata, nr_peaks=1,
     over offset - a spectrum can have a high peak/background ratio and
     still be extremely noisy), so they only exist once a fit actually
     ran - they, and center_uncertainty, are NaN on any exception below,
+    an unsupported `nr_peaks`, or too few points to constrain the fit,
     same as the other four.
     """
+    w0s = fwhms = intensities = offset = snr = nrmse = center_unc = np.nan
     try:
         idx_l = np.nanargmin(np.abs(xdata - region[0]))
         idx_r = np.nanargmin(np.abs(xdata - region[1]))
@@ -508,6 +510,17 @@ def fit_lorentz_region(region, xdata, ydata, nr_peaks=1,
         mask = ~(np.isnan(x) | np.isnan(y))
         x = x[mask]
         y = y[mask]
+        if nr_peaks not in (1, 2, 4):
+            return w0s, fwhms, intensities, offset, snr, nrmse, center_unc
+        # Each peak contributes 3 free parameters (w0, fwhm, intensity)
+        # plus one shared offset. Require strictly more points than
+        # that so the fit has at least one degree of freedom left -
+        # otherwise the fit is arbitrarily close to exact and its
+        # SNR/NRMSE become meaninglessly good (e.g. 3 points fit to a
+        # 4-parameter single Lorentz).
+        min_points = 3 * nr_peaks + 2
+        if len(x) < min_points:
+            return w0s, fwhms, intensities, offset, snr, nrmse, center_unc
         if nr_peaks == 1:
             w0s, fwhms, intensities, offset, snr, nrmse, center_unc = \
                 fit_lorentz(x, y)
@@ -523,13 +536,10 @@ def fit_lorentz_region(region, xdata, ydata, nr_peaks=1,
                     x, y,
                     bounds_w0=bounds_w0,
                     bounds_fwhm=bounds_fwhm)
-        else:
-            return
     except Exception:
         w0s = fwhms = intensities = offset \
             = snr = nrmse = center_unc = np.nan
-    finally:
-        return w0s, fwhms, intensities, offset, snr, nrmse, center_unc
+    return w0s, fwhms, intensities, offset, snr, nrmse, center_unc
 
 
 def calculate_exact_circle(points):

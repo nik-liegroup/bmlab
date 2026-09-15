@@ -5,6 +5,7 @@ import warnings
 import numpy as np
 
 from bmlab import Session
+from bmlab.file import Payload
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,24 @@ class BrillouinExport(object):
         for brillouin_repetition in brillouin_repetitions:
             self.session.set_current_repetition(brillouin_repetition)
 
+            # evaluate() resets quality_pass to all-NaN every time (see
+            # EvaluationModel.initialize_results_arrays()) - only an
+            # explicit apply_quality_thresholds() call (a GUI's "Apply"
+            # button, or batch evaluation) ever writes real values into
+            # it again. So "still all-NaN here" reliably means nobody
+            # has applied thresholds since the last evaluate - rather
+            # than exporting a stale/never-computed quality_pass column
+            # in that case (or requiring every caller, including a
+            # plain script, to remember this extra step), compute it
+            # here using the default threshold/peak-index resolution.
+            # A quality_pass that IS already populated reflects a
+            # deliberate choice (e.g. a specific peak index applied via
+            # BMicro's Quality tab) and is left untouched.
+            evm = self.session.evaluation_model()
+            if evm is not None \
+                    and np.all(np.isnan(evm.results['quality_pass'])):
+                self.evc.apply_quality_thresholds()
+
             # Get a list of all parameters available
             parameters = self.session.evaluation_model().get_parameter_keys()
             nr_brillouin_peaks =\
@@ -47,9 +66,17 @@ class BrillouinExport(object):
             # is None for an aborted/restarted acquisition that never
             # wrote any positions) - skip it entirely if not, instead
             # of re-discovering that once per parameter below.
+            # None (not e.g. 0 or 1) means no valid measurement grid at
+            # all - an aborted/restarted acquisition that never wrote
+            # any positions. A 0D (single point) or 1D (line scan)
+            # repetition still has real positions and results, and the
+            # CSV format (unlike the old per-parameter PNG heatmap
+            # exporter this replaced, which really did need >= 2
+            # dimensions to draw an image) has no such requirement -
+            # only skip when there is nothing to write at all.
             _, _, dimensionality, _ =\
                 self.evc.get_data(next(iter(parameters)), 0)
-            if dimensionality is None or dimensionality < 2:
+            if dimensionality is None:
                 continue
 
             self._export_combined_csv(
@@ -213,9 +240,9 @@ class BrillouinExport(object):
         # exactly as BrillouinAcquisition wrote it (positions-x/y/z) -
         # raw, not centered/rotated on the measurement grid. A
         # '<image>_transform.csv' written by OverviewBrightfieldExport
-        # next to an overview image maps these same (x, y) values onto
-        # that image's own pixel coordinates:
-        # [col, row, 1] = M @ [x, y, 1].
+        # into a 'TransformMatrices' subfolder next to the overview
+        # image maps these same (x, y) values onto that image's own
+        # pixel coordinates: [col, row, 1] = M @ [x, y, 1].
         with open(csv_filename, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=',')
             writer.writerow(['#source_file', self.file.path.name])
@@ -277,8 +304,23 @@ class BrillouinExport(object):
 
             if scale_calibration is not None:
                 for key, value in scale_calibration.items():
-                    writer.writerow([f'#{key}_x', value[0]])
-                    writer.writerow([f'#{key}_y', value[1]])
+                    # Point-style parameters (an (x, y) tuple, possibly
+                    # None if missing) get one row per axis, like
+                    # before; the newer scalar fields (objectiveName,
+                    # magnification, hasFovOffset, ...) get a single
+                    # row instead. Checked by key, not isinstance(),
+                    # since a missing point-style value is itself None
+                    # and can't otherwise be told apart from a missing
+                    # scalar.
+                    if key in Payload.SCALE_CALIBRATION_POINT_KEYS:
+                        writer.writerow(
+                            [f'#{key}_x',
+                             value[0] if value is not None else None])
+                        writer.writerow(
+                            [f'#{key}_y',
+                             value[1] if value is not None else None])
+                    else:
+                        writer.writerow([f'#{key}', value])
 
             header = ['x', 'y', 'z'] + [name for name, _ in columns]
             writer.writerow(header)

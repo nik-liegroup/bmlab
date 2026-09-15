@@ -5,7 +5,8 @@ from PIL import Image
 
 from bmlab import Session
 from bmlab.export.timing import get_brillouin_windows, classify_timing
-from bmlab.export.alignment import get_tmatrix, warp_local
+from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
+    warp_local, get_point_to_pixel_matrix, write_transform_csv
 
 
 class CombinationInvalid(Exception):
@@ -74,6 +75,15 @@ class FluorescenceCombinedExport(object):
             # Get the scale calibration
             scale_calibration = repetition.payload.get_scale_calibration()
             tmatrix = get_tmatrix(scale_calibration)
+            pixels_per_um = get_pixels_per_um(scale_calibration)
+
+            # Every channel image in a Fluorescence-mode repetition is
+            # the same single-point capture (see FluorescenceExport),
+            # so any one of them - here the first - anchors the
+            # combined image at the same stage position they all share.
+            position = repetition.payload.get_position(image_keys[0])
+            anchor_um = (position['x'], position['y']) \
+                if position is not None else None
 
             channels_available = []
             # Loop over all images in this repetition and
@@ -156,7 +166,8 @@ class FluorescenceCombinedExport(object):
 
                 # Warp the image to align with a standard x-y
                 # coordinate system
-                image_data_warped, _, _ = warp_local(rgb_data, tmatrix)
+                image_data_warped, _, translate = \
+                    warp_local(rgb_data, tmatrix)
 
                 # Export image with proper alpha channel
                 image_warped = Image.fromarray(
@@ -171,3 +182,12 @@ class FluorescenceCombinedExport(object):
                 filename = path / \
                     f"fluorescenceCombined_{combination}{timing_part}.png"
                 image_warped.save(filename)
+
+                # Same stage-position -> pixel transform matrix
+                # FluorescenceExport/OverviewBrightfieldExport write
+                # for their own images (see write_transform_csv()), so
+                # this combined image can be placed the same way.
+                matrix = get_point_to_pixel_matrix(
+                    tmatrix, pixels_per_um, anchor_um, rgb_data.shape,
+                    translate)
+                write_transform_csv(matrix, filename)

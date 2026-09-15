@@ -959,6 +959,11 @@ class EvaluationController(ImageController):
 
     # Parameter keys meaningful as a quality filter - see
     # EvaluationModel.get_default_parameters() for what each measures.
+    # Every key here except 'brillouin_peak_fwhm_f' also has a default
+    # threshold in EvaluationModel.get_default_quality_thresholds() -
+    # kept in sync by tests/test_evaluation_controller.py::
+    # test_quality_metric_keys_matches_default_thresholds(), since the
+    # two lists are otherwise independently maintained.
     QUALITY_METRIC_KEYS = [
         'brillouin_peak_snr',
         'brillouin_peak_center_uncertainty',
@@ -1003,11 +1008,40 @@ class EvaluationController(ImageController):
             current['max'] = max_value
         evm.quality_thresholds[metric_key] = current
 
-    def compute_quality_mask(self):
+    def _default_quality_peak_index(self, evm):
+        """
+        The Brillouin peak index (see get_data()'s own docstring for
+        what each index means) quality checks fall back to when the
+        caller doesn't pick one explicitly: index 0 - the always-
+        computed single-peak fit - is only actually the fit result a
+        user cares about when nr_brillouin_peaks == 1. Once multi-peak
+        fitting is on, index 0 is just an internal reference fit, so
+        default instead to the weighted average of the real multi-peak
+        fits (nr_peaks_stored + 1, i.e. nr_brillouin_peaks + 2) - the
+        same combined estimate BrillouinExport's '_peak-average-
+        weighted' column reports.
+        """
+        nr_brillouin_peaks = getattr(evm, 'nr_brillouin_peaks', 1)
+        if nr_brillouin_peaks <= 1:
+            return 0
+        return nr_brillouin_peaks + 2
+
+    def compute_quality_mask(self, brillouin_peak_index=None):
         """
         Evaluates every enabled quality threshold (see
         set_quality_threshold()) against the current evaluation
         results and combines them with AND.
+
+        Parameters
+        ----------
+        brillouin_peak_index: int or None
+            Which Brillouin peak fit's diagnostics to check (see
+            get_data()'s own docstring for index semantics). None (the
+            default) resolves via _default_quality_peak_index(): the
+            single-peak fit if nr_brillouin_peaks == 1, otherwise the
+            weighted average across the real multi-peak fits - never
+            the always-computed single-peak reference fit, which a
+            multi-peak measurement isn't actually using.
 
         Returns
         -------
@@ -1024,7 +1058,10 @@ class EvaluationController(ImageController):
         if not evm:
             return None, None
 
-        time_data, _, _, _ = self.get_data('time', 0)
+        if brillouin_peak_index is None:
+            brillouin_peak_index = self._default_quality_peak_index(evm)
+
+        time_data, _, _, _ = self.get_data('time', brillouin_peak_index)
         if time_data is None:
             return None, None
         measured = ~np.isnan(time_data)
@@ -1036,7 +1073,7 @@ class EvaluationController(ImageController):
             if threshold.get('min') is None \
                     and threshold.get('max') is None:
                 continue
-            data, _, _, _ = self.get_data(metric_key, 0)
+            data, _, _, _ = self.get_data(metric_key, brillouin_peak_index)
             metric_mask = np.ones(mask.shape, dtype=bool)
             if threshold.get('min') is not None:
                 metric_mask &= (data >= threshold['min'])
@@ -1046,7 +1083,7 @@ class EvaluationController(ImageController):
 
         return mask, measured
 
-    def apply_quality_thresholds(self):
+    def apply_quality_thresholds(self, brillouin_peak_index=None):
         """
         Computes compute_quality_mask() and stores it as
         evm.results['quality_pass'] (1.0 where a measured point passes
@@ -1054,11 +1091,13 @@ class EvaluationController(ImageController):
         point was never measured) - so it flows through get_data(),
         the standard plots, and BrillouinExport's combined CSV exactly
         like any other parameter, without touching any other result.
+        `brillouin_peak_index` is passed straight through to
+        compute_quality_mask() - see its docstring for the default.
         """
         evm = self.session.evaluation_model()
         if not evm:
             return
-        mask, measured = self.compute_quality_mask()
+        mask, measured = self.compute_quality_mask(brillouin_peak_index)
         if mask is None:
             return
         quality_pass = np.full(mask.shape, np.nan)
@@ -1066,8 +1105,18 @@ class EvaluationController(ImageController):
         # quality_pass has no frame/region/peak axes of its own (it's
         # already a per-point pass/fail) - broadcast to the standard
         # 6D results shape so it flows through get_data() like every
-        # other parameter.
-        shape = evm.results['time'].shape
+        # other parameter. evm.results['time'] normally already has
+        # that shape, but a repetition that was never evaluate()'d
+        # keeps its EvaluationModel.__init__ placeholder (an empty
+        # (0,) array) instead - in that case fall back to a minimal
+        # shape built from mask itself (get_data()'s own resolution
+        # fallback), rather than broadcasting into a shape that
+        # doesn't even agree with mask on its first three dimensions.
+        time_shape = evm.results['time'].shape
+        if len(time_shape) >= 3 and time_shape[:3] == mask.shape:
+            shape = time_shape
+        else:
+            shape = mask.shape + (1, 1, 1)
         evm.results['quality_pass'] = np.broadcast_to(
             quality_pass[:, :, :, np.newaxis, np.newaxis, np.newaxis],
             shape).copy()

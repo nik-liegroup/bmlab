@@ -344,6 +344,25 @@ def test_default_quality_thresholds():
     assert mask.sum() == 0
 
 
+def test_quality_metric_keys_matches_default_thresholds():
+    """
+    Regression/drift guard: EvaluationController.QUALITY_METRIC_KEYS
+    (which metrics the Quality tab shows a row for) and
+    EvaluationModel.get_default_quality_thresholds() (which of those
+    get a default enabled threshold) are two independently maintained
+    collections - this pins their only allowed difference
+    ('brillouin_peak_fwhm_f' deliberately has no default threshold,
+    see that method's own docstring), so an edit to one that forgets
+    the other fails loudly here instead of silently drifting.
+    """
+    default_threshold_keys = set(
+        EvaluationModel.get_default_quality_thresholds().keys())
+    assert set(EvaluationController.QUALITY_METRIC_KEYS) - \
+        default_threshold_keys == {'brillouin_peak_fwhm_f'}
+    assert default_threshold_keys.issubset(
+        EvaluationController.QUALITY_METRIC_KEYS)
+
+
 def test_calculate_derived_values_different_region_count():
     evc = EvaluationController()
     evc.session.set_file(data_file_path('Water.h5'))
