@@ -6,6 +6,7 @@ import numpy as np
 
 from bmlab import Session
 from bmlab.file import Payload
+from bmlab.export.selection import repetition_selected
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,9 @@ class BrillouinExport(object):
         if not config['export']:
             return
 
-        brillouin_repetitions = self.file.repetition_keys()
-        selected_repetitions = config.get('repetitions')
-        if selected_repetitions is not None:
-            brillouin_repetitions = [
-                repetition for repetition in brillouin_repetitions
-                if repetition in selected_repetitions]
+        brillouin_repetitions = [
+            repetition for repetition in self.file.repetition_keys()
+            if repetition_selected(configuration, repetition)]
 
         for brillouin_repetition in brillouin_repetitions:
             self.session.set_current_repetition(brillouin_repetition)
@@ -208,6 +206,8 @@ class BrillouinExport(object):
 
         scale_calibration = self.file.get_repetition(
             brillouin_repetition).payload.get_scale_calibration()
+        acquisition_settings = self.file.get_repetition(
+            brillouin_repetition).payload.get_acquisition_settings()
 
         # Grid points outside the measured ROI have no image key at all,
         # so EvaluationController.evaluate()'s per-point loop never
@@ -320,6 +320,18 @@ class BrillouinExport(object):
                             [f'#{key}_y',
                              value[1] if value is not None else None])
                     else:
+                        writer.writerow([f'#{key}', value])
+
+            # The acquisition settings actually used for this repetition
+            # (calibration/repetition schedule, BF overview coverage,
+            # per-point brightfield timing, ROI masks, ...) - see
+            # Payload.ACQUISITION_SETTINGS for what each key means. Only
+            # settings this file's BrillouinAcquisition version actually
+            # recorded are written (get_acquisition_settings() leaves the
+            # rest at None).
+            if acquisition_settings is not None:
+                for key, value in acquisition_settings.items():
+                    if value is not None:
                         writer.writerow([f'#{key}', value])
 
             header = ['x', 'y', 'z'] + [name for name, _ in columns]

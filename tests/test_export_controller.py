@@ -34,6 +34,62 @@ def data_file_path(file_name):
     return Path(__file__).parent / 'data' / file_name
 
 
+def assert_glob_exists(directory, pattern):
+    """
+    Asserts at least one file in `directory` matches `pattern` - used
+    wherever a filename contains a repetition_or_timestamp_tag()
+    timestamp (see bmlab.export.naming), which isn't predictable from
+    the fixture alone the way a '_BMrepN' tag is.
+    """
+    matches = list(directory.glob(pattern))
+    assert matches, f"no file matching '{pattern}' in {directory}"
+    return matches[0]
+
+
+def test_export_fluorescence_respects_brillouin_repetition_filter(tmp_dir):
+    """
+    Regression test: FluorescenceExport/FluorescenceCombinedExport must
+    also respect config['brillouin']['repetitions'] for Fluorescence
+    repetitions tied to a Brillouin one (see MeasurementData.
+    get_brillouin_repetition_index()) - a Fluorescence repetition with
+    no such tie (a standalone Fluorescence-tab capture) is exported
+    regardless, since there is no repetition choice for it to be
+    excluded by.
+    """
+    shutil.copy(
+        data_file_path('Fluorescence.h5'), Path.cwd() / 'Fluorescence.h5')
+
+    with h5py.File(Path.cwd() / 'Fluorescence.h5', 'r+') as f:
+        for idx in range(4):
+            f[f'Fluorescence/0/payload/data/{idx}'].attrs[
+                'brillouin_repetition_index'] = np.array([0])
+        # Repetition '1' is left without the attribute - a standalone
+        # capture, never excluded by the repetition selection.
+
+    session = Session.get_instance()
+    session.set_file(Path('Fluorescence.h5'))
+
+    ec = ExportController()
+    config = ec.get_configuration()
+    config['brillouin']['export'] = False
+    # Exclude Brillouin repetition '0' - repetition 0's Fluorescence
+    # images must disappear, repetition 1's must remain.
+    config['brillouin']['repetitions'] = []
+    ec.export(config)
+
+    session.clear()
+
+    plots_dir = tmp_dir.parent / 'Plots'
+    for channel in ('Blue', 'Green', 'Red', 'Brightfield'):
+        assert not list(plots_dir.glob(f'{channel}_*_FLrep0.png'))
+        assert_glob_exists(plots_dir, f'{channel}_*_FLrep1.png')
+
+    combined_dir = tmp_dir.parent / 'Plots' / 'Bare'
+    assert not list(combined_dir.glob('fluorescenceCombined_rgb_*_FLrep0.png'))
+    assert_glob_exists(
+        combined_dir, 'fluorescenceCombined_rgb_*_FLrep1.png')
+
+
 def test_export_fluorescence(tmp_dir):
     shutil.copy(
         data_file_path('Fluorescence.h5'), Path.cwd() / 'Fluorescence.h5')
@@ -52,19 +108,13 @@ def test_export_fluorescence(tmp_dir):
     plots_dir = tmp_dir.parent / 'Plots'
     # Fluorescence.h5 has a scale calibration and no Brillouin
     # repetitions, so only the aligned image is exported (no camera-
-    # pixel-space raw image, no before/during/after tag).
-    images = [
-        'Blue_FLrep0.png',
-        'Brightfield_FLrep0.png',
-        'Green_FLrep0.png',
-        'Red_FLrep0.png',
-        'Blue_FLrep1.png',
-        'Brightfield_FLrep1.png',
-        'Green_FLrep1.png',
-        'Red_FLrep1.png',
-    ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
+    # pixel-space raw image). None of its images carry a
+    # brillouin_repetition_index, so each filename gets a capture-
+    # timestamp tag (see bmlab.export.naming.repetition_or_timestamp_tag)
+    # instead of a '_BMrepN' one.
+    for channel in ('Blue', 'Brightfield', 'Green', 'Red'):
+        for rep in ('0', '1'):
+            assert_glob_exists(plots_dir, f'{channel}_*_FLrep{rep}.png')
 
 
 def test_export_fluorescence_transform_matrix(tmp_dir):
@@ -114,26 +164,30 @@ def test_export_fluorescence_transform_matrix(tmp_dir):
         assert matrix[2].tolist() == [0.0, 0.0, 1.0]
         return matrix
 
-    for image in ('Blue_FLrep0.png', 'Green_FLrep0.png', 'Red_FLrep0.png',
-                  'Brightfield_FLrep0.png'):
+    for channel in ('Blue', 'Green', 'Red', 'Brightfield'):
+        png = assert_glob_exists(plots_dir, f'{channel}_*_FLrep0.png')
         assert_valid_matrix(
-            transform_dir / (Path(image).stem + '_transform.csv'))
+            transform_dir / (png.stem + '_transform.csv'))
 
     # Both repetitions were given a different x position (see above) -
     # their transform matrices must actually differ, not just both
     # happen to exist.
+    png_rep0 = assert_glob_exists(plots_dir, 'Blue_*_FLrep0.png')
+    png_rep1 = assert_glob_exists(plots_dir, 'Blue_*_FLrep1.png')
     matrix_rep0 = assert_valid_matrix(
-        transform_dir / 'Blue_FLrep0_transform.csv')
+        transform_dir / (png_rep0.stem + '_transform.csv'))
     matrix_rep1 = assert_valid_matrix(
-        transform_dir / 'Blue_FLrep1_transform.csv')
+        transform_dir / (png_rep1.stem + '_transform.csv'))
     assert not np.allclose(matrix_rep0, matrix_rep1)
 
     combined_transform_dir = \
         tmp_dir.parent / 'Plots' / 'Bare' / 'TransformMatrices'
     assert combined_transform_dir.is_dir()
+    combined_png = assert_glob_exists(
+        tmp_dir.parent / 'Plots' / 'Bare',
+        'fluorescenceCombined_rgb_*_FLrep0.png')
     assert_valid_matrix(
-        combined_transform_dir /
-        'fluorescenceCombined_rgb_FLrep0_transform.csv')
+        combined_transform_dir / (combined_png.stem + '_transform.csv'))
 
 
 def test_export_color_images(tmp_dir):
@@ -152,11 +206,7 @@ def test_export_color_images(tmp_dir):
     session.clear()
 
     plots_dir = tmp_dir.parent / 'Plots'
-    images = [
-        'Brightfield_FLrep0.png',
-    ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
+    assert_glob_exists(plots_dir, 'Brightfield_*_FLrep0.png')
 
 
 def test_export_color_images_plane(tmp_dir):
@@ -176,11 +226,7 @@ def test_export_color_images_plane(tmp_dir):
     session.clear()
 
     plots_dir = tmp_dir.parent / 'Plots'
-    images = [
-        'Brightfield_FLrep0.png',
-    ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
+    assert_glob_exists(plots_dir, 'Brightfield_*_FLrep0.png')
 
 
 def test_export_fluorescence_combined(tmp_dir):
@@ -201,24 +247,16 @@ def test_export_fluorescence_combined(tmp_dir):
     plots_dir = tmp_dir.parent / 'Plots' / 'Bare'
     # Fluorescence.h5 has a scale calibration and no Brillouin
     # repetitions, so only the stage-aligned combination is exported.
-    images = [
-        'fluorescenceCombined___b_FLrep0.png',
-        'fluorescenceCombined__g__FLrep0.png',
-        'fluorescenceCombined__gb_FLrep0.png',
-        'fluorescenceCombined_r___FLrep0.png',
-        'fluorescenceCombined_r_b_FLrep0.png',
-        'fluorescenceCombined_rg__FLrep0.png',
-        'fluorescenceCombined_rgb_FLrep0.png',
-        'fluorescenceCombined___b_FLrep1.png',
-        'fluorescenceCombined__g__FLrep1.png',
-        'fluorescenceCombined__gb_FLrep1.png',
-        'fluorescenceCombined_r___FLrep1.png',
-        'fluorescenceCombined_r_b_FLrep1.png',
-        'fluorescenceCombined_rg__FLrep1.png',
-        'fluorescenceCombined_rgb_FLrep1.png',
+    # None of its images carry a brillouin_repetition_index, so each
+    # filename gets a capture-timestamp tag instead of a '_BMrepN' one.
+    combinations = [
+        '__b', '_g_', '_gb', 'r__', 'r_b', 'rg_', 'rgb',
     ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
+    for combination in combinations:
+        for rep in ('0', '1'):
+            assert_glob_exists(
+                plots_dir,
+                f'fluorescenceCombined_{combination}_*_FLrep{rep}.png')
 
 
 def test_export_brillouin_2D(tmp_dir):
@@ -349,6 +387,63 @@ def test_export_brillouin_rayleigh_shift_column(tmp_dir):
     assert not np.isnan(float(rows[0]['rayleigh_shift']))
 
 
+def test_export_brillouin_acquisition_settings_in_csv(tmp_dir):
+    """
+    Regression test: the acquisition settings actually used for a
+    repetition (calibration schedule, per-point-brightfield timing,
+    background ROI, ...) must end up in the combined CSV's '#' header,
+    not just be readable via Payload.get_acquisition_settings() - see
+    BrillouinExport._export_combined_csv(). 2D-xy.h5 predates every one
+    of these settings, so this adds a couple directly to a copy of it
+    (mimicking what a real BrillouinAcquisition capture writes) to
+    exercise that path; a setting this file still doesn't have (e.g.
+    con-calibration-used) must simply be absent from the header, not
+    written as an empty/None row.
+    """
+    shutil.copy(
+        data_file_path('2D-xy.h5'), Path.cwd() / '2D-xy.h5')
+
+    with h5py.File(Path.cwd() / '2D-xy.h5', 'r+') as f:
+        payload = f['Brillouin/0/payload']
+        payload.create_dataset(
+            'positions-per-point-brightfield-during-acquisition-used',
+            data=np.array([1.0]))
+        payload.create_dataset(
+            'positions-background-roi-mask-used', data=np.array([0.0]))
+
+    session = Session.get_instance()
+    session.set_file(Path('2D-xy.h5'))
+    session.set_current_repetition('0')
+    evm = session.evaluation_model()
+
+    resolution = session.get_payload_resolution()
+    shape = (resolution[0], resolution[1], resolution[2], 1, 1, 1)
+    evm.results['time'] = np.ones(shape)
+    evm.results['intensity'] = np.full(shape, 100.0)
+
+    ec = ExportController()
+    config = ec.get_configuration()
+    config['fluorescence']['export'] = False
+    config['fluorescenceCombined']['export'] = False
+    config['surface']['export'] = False
+    config['overviewBrightfield']['export'] = False
+    ec.export(config)
+
+    session.clear()
+
+    csv_path = tmp_dir.parent / 'Export' / '2D-xy_BMrep0_data.csv'
+    with open(csv_path, newline='') as f:
+        header_rows = dict(
+            row for row in csv.reader(f) if row and row[0].startswith('#'))
+
+    assert header_rows[
+        '#per_point_brightfield_during_acquisition_used'] == '1.0'
+    assert header_rows['#background_roi_mask_used'] == '0.0'
+    # con-calibration-used was never added to this file - must not
+    # appear as an empty/None row.
+    assert '#con_calibration_used' not in header_rows
+
+
 def test_export_brillouin_drops_only_unmeasured_points(tmp_dir):
     """
     A grid point outside the ROI never gets an image key at all, so
@@ -443,9 +538,98 @@ def test_export_brillouin_repetition_filter(tmp_dir):
     assert not os.path.exists(tmp_dir.parent / 'Plots')
 
 
+def test_export_repetition_filter_also_restricts_other_exporters(tmp_dir):
+    """
+    Regression test: config['brillouin']['repetitions'] must restrict
+    every exporter, not just the combined CSV (BrillouinExport) -
+    SurfaceExport, OverviewBrightfieldExport, FluorescenceExport and
+    FluorescenceCombinedExport previously ignored it entirely and
+    always exported every repetition's data regardless of the
+    selection.
+    """
+    shutil.copy(
+        data_file_path('SurfaceScan.h5'), Path.cwd() / 'SurfaceScan.h5')
+
+    # SurfaceScan.h5 predates brillouin_repetition_index - add it to its
+    # overview images directly (mimicking what a real BrillouinAcquisition
+    # capture now writes), same as test_export_surface_and_overview_
+    # brightfield below.
+    with h5py.File(Path.cwd() / 'SurfaceScan.h5', 'r+') as f:
+        for idx in range(4):
+            ds = f[f'Fluorescence/0/payload/data/{idx}']
+            ds.attrs['brillouin_repetition_index'] = np.array([0])
+
+    session = Session.get_instance()
+    session.set_file(Path('SurfaceScan.h5'))
+
+    ec = ExportController()
+    config = ec.get_configuration()
+    config['fluorescenceCombined']['export'] = False
+    config['brillouin']['export'] = False
+    # SurfaceScan.h5 only has Brillouin repetition '0' - excluding it
+    # should suppress the surface/overview-brightfield exports too, not
+    # just the (already disabled) combined CSV.
+    config['brillouin']['repetitions'] = []
+    ec.export(config)
+
+    session.clear()
+
+    plots_dir = tmp_dir.parent / 'Plots'
+    assert not os.path.exists(plots_dir / 'surface_BMrep0_z_surface.png')
+    assert not os.path.exists(
+        plots_dir / 'overviewZStack_0_BMrep0_tiled.tif')
+    assert not os.path.exists(
+        tmp_dir.parent / 'Export' / 'surface_BMrep0_metrics.json')
+
+
+def test_export_surface_skipped_when_neither_follow_nor_roi_used(tmp_dir):
+    """
+    Regression test: BrillouinAcquisition writes the surface-scan
+    dataset group unconditionally on every payload since H5BM-v0.0.4,
+    whether or not surface following or an ROI restriction was
+    actually used for that particular repetition - has_surface_scan()
+    (checked by SurfaceExport via get_surface_scan_data()) only
+    reflects the file format version, not this run's settings. A run
+    that used neither must not produce a surface export at all.
+    """
+    shutil.copy(
+        data_file_path('SurfaceScan.h5'), Path.cwd() / 'SurfaceScan.h5')
+
+    with h5py.File(Path.cwd() / 'SurfaceScan.h5', 'r+') as f:
+        g = f['Brillouin/0/payload']
+        g['positions-surface-follow-used'][()] = 0
+        g['positions-roi-mask-used'][()] = 0
+
+    session = Session.get_instance()
+    session.set_file(Path('SurfaceScan.h5'))
+
+    ec = ExportController()
+    config = ec.get_configuration()
+    config['fluorescence']['export'] = False
+    config['fluorescenceCombined']['export'] = False
+    config['brillouin']['export'] = False
+    config['overviewBrightfield']['export'] = False
+    ec.export(config)
+
+    session.clear()
+
+    assert not os.path.exists(tmp_dir.parent / 'Plots')
+    assert not os.path.exists(tmp_dir.parent / 'Export')
+
+
 def test_export_surface_and_overview_brightfield(tmp_dir):
     shutil.copy(
         data_file_path('SurfaceScan.h5'), Path.cwd() / 'SurfaceScan.h5')
+
+    # SurfaceScan.h5 predates brillouin_repetition_index (see
+    # MeasurementData.get_brillouin_repetition_index()) - add it to its
+    # overview images directly (mimicking what a real BrillouinAcquisition
+    # capture now writes) so the export exercises the real, current
+    # '_BMrepN' naming instead of falling back to a timestamp tag.
+    with h5py.File(Path.cwd() / 'SurfaceScan.h5', 'r+') as f:
+        for idx in range(4):
+            ds = f[f'Fluorescence/0/payload/data/{idx}']
+            ds.attrs['brillouin_repetition_index'] = np.array([0])
 
     session = Session.get_instance()
     session.set_file(Path('SurfaceScan.h5'))
@@ -465,16 +649,16 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
         'surface_BMrep0_z_surface.png',
         'surface_BMrep0_3d.png',
         'surface_BMrep0_roi_plan_mask.png',
-        # SurfaceScan.h5's overview images were captured after
-        # Brillouin repetition 0 finished, with 2 z-planes x 2 tiles
-        # each (point_count=2, point_stack_counts=[1, 1]) - no FLrep
-        # in the name (only one overview stack is ever written per
-        # Brillouin repetition), one file per z-plane since each
-        # plane's own tiles don't belong in one combined stack with
-        # another plane's, and each is a tiled mosaic since it has
-        # more than one distinct tile position.
-        'overviewZStack_0_BMrep0_afterAcq_tiled.tif',
-        'overviewZStack_1_BMrep0_afterAcq_tiled.tif',
+        # SurfaceScan.h5's overview images belong to Brillouin
+        # repetition 0 (see the injected brillouin_repetition_index
+        # above), with 2 z-planes x 2 tiles each (point_count=2,
+        # point_stack_counts=[1, 1]) - no FLrep in the name (only one
+        # overview stack is ever written per Brillouin repetition), one
+        # file per z-plane since each plane's own tiles don't belong in
+        # one combined stack with another plane's, and each is a tiled
+        # mosaic since it has more than one distinct tile position.
+        'overviewZStack_0_BMrep0_tiled.tif',
+        'overviewZStack_1_BMrep0_tiled.tif',
     ]
     for image in images:
         assert os.path.exists(plots_dir / image)
@@ -482,8 +666,8 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
     # Each tiled mosaic gets a matching matrix mapping an absolute
     # stage position (x, y, um) onto its own pixel coordinates.
     transforms = [
-        'overviewZStack_0_BMrep0_afterAcq_tiled_transform.csv',
-        'overviewZStack_1_BMrep0_afterAcq_tiled_transform.csv',
+        'overviewZStack_0_BMrep0_tiled_transform.csv',
+        'overviewZStack_1_BMrep0_tiled_transform.csv',
     ]
     matrices_dir = plots_dir / 'TransformMatrices'
     for transform in transforms:

@@ -8,6 +8,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers '3d')
 
 from bmlab import Session
 from bmlab.file import Payload
+from bmlab.export.selection import repetition_selected
 
 
 class SurfaceExport(object):
@@ -27,9 +28,25 @@ class SurfaceExport(object):
             return
 
         for repetition_key in self.file.repetition_keys():
+            if not repetition_selected(configuration, repetition_key):
+                continue
             repetition = self.file.get_repetition(repetition_key)
             data = repetition.payload.get_surface_scan_data()
             if data is None:
+                continue
+
+            # BrillouinAcquisition writes this whole dataset group
+            # unconditionally on every payload since H5BM-v0.0.4 -
+            # has_surface_scan() (behind get_surface_scan_data()) only
+            # reflects the FILE FORMAT version, not whether surface
+            # following or an ROI restriction was actually used for
+            # this particular repetition. Without this check, a run
+            # that did neither still produces a full set of
+            # essentially empty plots (an all-NaN z-surface map, an
+            # unrestricted "ROI" mask covering the whole grid, etc.)
+            # and a metrics file with nothing meaningful in it.
+            if not data.get('surface_follow_used') \
+                    and not data.get('roi_mask_used'):
                 continue
 
             filename_base = f"surface_BMrep{repetition_key}"

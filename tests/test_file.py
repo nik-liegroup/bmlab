@@ -5,7 +5,7 @@ import datetime
 import h5py
 import numpy as np
 
-from bmlab.file import BrillouinFile, Payload, \
+from bmlab.file import BrillouinFile, Payload, Repetition, \
     BadFileException, is_source_file, is_session_file
 
 
@@ -112,6 +112,54 @@ def test_file_repetition_has_calibration():
     bf = BrillouinFile(data_file_path('Water_old.h5'))
     rep = bf.get_repetition('0')
     assert not rep.calibration.is_empty()
+
+
+def _make_repetition(tmp_path, name, populate_repetition):
+    """
+    Creates a standalone HDF5 repetition group (not a full BrillouinFile)
+    in a temp file and wraps it in a Repetition, for exercising Repetition
+    logic (e.g. the optional 'background' group) against synthetic
+    datasets/attributes without needing a full BrillouinAcquisition-
+    generated fixture file.
+    """
+    h5 = h5py.File(tmp_path / name, 'w')
+    group = h5.create_group('repetition')
+    group.attrs.create(
+        'date', np.array([b'2020-11-03T15:20:52.852+01:00'], dtype='S'))
+    group.create_group('payload')
+    populate_repetition(group)
+    return Repetition(group, None)
+
+
+def test_file_repetition_has_no_background_by_default(tmp_path):
+    rep = _make_repetition(tmp_path, 'no_background.h5', lambda group: None)
+    assert not hasattr(rep, 'background')
+
+
+def test_file_repetition_has_background(tmp_path):
+    def populate(group):
+        background = group.create_group('background')
+        data = background.create_group('data')
+        image = data.create_dataset('0', data=np.zeros((2, 4, 4)))
+        image.attrs.create(
+            'date', np.array([b'2020-11-03T15:21:00.000+01:00'], dtype='S'))
+        image.attrs.create('channel', np.array([b'Background'], dtype='S'))
+        image.attrs['position_x_um'] = [1.0]
+        image.attrs['position_y_um'] = [2.0]
+        image.attrs['position_z_um'] = [3.0]
+        image.attrs['stage_position_x_um'] = [1.1]
+        image.attrs['stage_position_y_um'] = [2.1]
+        image.attrs['stage_position_z_um'] = [3.1]
+
+    rep = _make_repetition(tmp_path, 'background.h5', populate)
+
+    assert not rep.background.is_empty()
+    assert rep.background.image_keys() == ['0']
+    assert rep.background.get_image('0').shape == (2, 4, 4)
+    assert rep.background.get_channel('0') == 'Background'
+    assert rep.background.get_position('0') == {'x': 1.0, 'y': 2.0, 'z': 3.0}
+    assert rep.background.get_stage_position('0') == \
+        {'x': 1.1, 'y': 2.1, 'z': 3.1}
 
 
 def test_file_payload_image_keys():
@@ -369,6 +417,109 @@ def test_file_get_surface_scan_data():
     assert data['surface_verification_steps_used'] == 3
 
 
+def test_file_get_background_roi_absent_by_default():
+    bf = BrillouinFile(data_file_path('Water.h5'))
+    rep = bf.get_repetition('0')
+    assert rep.payload.get_background_roi() is None
+
+
+def test_file_get_background_roi(tmp_path):
+    def populate(group):
+        group.create_dataset(
+            'positions-background-roi-mask-used', data=np.array([1.0]))
+        group.create_dataset(
+            'positions-background-roi-polygon-x-um',
+            data=np.array([1.0, 2.0, 2.0]))
+        group.create_dataset(
+            'positions-background-roi-polygon-y-um',
+            data=np.array([1.0, 1.0, 3.0]))
+
+    payload = _make_payload(tmp_path, 'background_roi.h5', populate)
+
+    roi = payload.get_background_roi()
+    assert roi['mask_used'] is True
+    np.testing.assert_array_equal(roi['polygon_x'], [1.0, 2.0, 2.0])
+    np.testing.assert_array_equal(roi['polygon_y'], [1.0, 1.0, 3.0])
+
+
+def test_file_get_background_roi_disabled(tmp_path):
+    def populate(group):
+        group.create_dataset(
+            'positions-background-roi-mask-used', data=np.array([0.0]))
+
+    payload = _make_payload(tmp_path, 'background_roi_off.h5', populate)
+
+    roi = payload.get_background_roi()
+    assert roi['mask_used'] is False
+    assert roi['polygon_x'] is None
+    assert roi['polygon_y'] is None
+
+
+def test_file_get_spectral_proxy_rois_absent_by_default():
+    bf = BrillouinFile(data_file_path('Water.h5'))
+    rep = bf.get_repetition('0')
+    assert rep.payload.get_spectral_proxy_rois() is None
+
+
+def test_file_get_spectral_proxy_rois(tmp_path):
+    def populate(group):
+        group.create_dataset(
+            'positions-surface-proxy-roi-1-used',
+            data=np.array([10.0, 20.0, 30.0, 40.0]))
+        group.create_dataset(
+            'positions-surface-proxy-roi-1-frame-used',
+            data=np.array([512.0, 256.0, 100.0, 50.0, 2048.0, 1024.0]))
+        # ROI 2 was never drawn - width/height stay at their 0 default.
+        group.create_dataset(
+            'positions-surface-proxy-roi-2-used',
+            data=np.array([0.0, 0.0, 0.0, 0.0]))
+        group.create_dataset(
+            'positions-surface-proxy-roi-2-frame-used',
+            data=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+
+    payload = _make_payload(tmp_path, 'spectral_proxy_roi.h5', populate)
+
+    rois = payload.get_spectral_proxy_rois()
+    assert rois[1] == {
+        'left': 10, 'top': 20, 'width': 30, 'height': 40,
+        'frame': {
+            'width': 512, 'height': 256,
+            'origin_left': 100, 'origin_bottom': 50,
+            'width_physical': 2048, 'height_physical': 1024,
+        },
+    }
+    assert rois[2] is None
+
+
+def test_file_get_acquisition_settings_absent_by_default():
+    bf = BrillouinFile(data_file_path('Water.h5'))
+    rep = bf.get_repetition('0')
+    settings = rep.payload.get_acquisition_settings()
+    assert settings is not None
+    assert all(value is None for value in settings.values())
+
+
+def test_file_get_acquisition_settings(tmp_path):
+    def populate(group):
+        group.create_dataset(
+            'positions-per-point-brightfield-during-acquisition-used',
+            data=np.array([1.0]))
+        group.create_dataset(
+            'positions-background-roi-mask-used', data=np.array([0.0]))
+        group.create_dataset(
+            'positions-repetitions-count-used', data=np.array([3.0]))
+
+    payload = _make_payload(tmp_path, 'acquisition_settings.h5', populate)
+
+    settings = payload.get_acquisition_settings()
+    assert settings['per_point_brightfield_during_acquisition_used'] == 1.0
+    assert settings['background_roi_mask_used'] == 0.0
+    assert settings['repetitions_count_used'] == 3.0
+    # Never written for this synthetic file - stays None rather than
+    # raising or being silently omitted from the dict.
+    assert settings['con_calibration_used'] is None
+
+
 def test_file_get_overview_brightfield_positions():
     bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
     rep = bf.get_repetition('0')
@@ -517,6 +668,29 @@ def test_file_get_overview_brightfield_images():
 
     image = rep.payload.get_image(keys[0])
     assert image.shape == (1, 20, 20)
+
+
+def test_file_get_brillouin_repetition_index_absent_by_default():
+    bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
+    rep = bf.get_repetition('0', 'Fluorescence')
+    keys = rep.payload.image_keys_by_channel('Brightfield z overview')
+    # SurfaceScan.h5 predates brillouin_repetition_index.
+    assert rep.payload.get_brillouin_repetition_index(keys[0]) is None
+
+
+def test_file_get_brillouin_repetition_index(tmp_path):
+    def populate(group):
+        data = group.create_group('data')
+        with_index = data.create_dataset('0', data=np.zeros((1, 2, 2)))
+        with_index.attrs['brillouin_repetition_index'] = [2]
+        without_index = data.create_dataset('1', data=np.zeros((1, 2, 2)))
+        del without_index  # no brillouin_repetition_index attr at all
+
+    payload = _make_payload(tmp_path, 'brillouin_repetition_index.h5',
+                            populate)
+
+    assert payload.get_brillouin_repetition_index('0') == 2
+    assert payload.get_brillouin_repetition_index('1') is None
 
 
 def test_file_get_scale_calibration():

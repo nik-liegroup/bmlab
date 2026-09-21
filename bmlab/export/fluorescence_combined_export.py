@@ -4,7 +4,8 @@ import scipy
 from PIL import Image
 
 from bmlab import Session
-from bmlab.export.timing import get_brillouin_windows, classify_timing
+from bmlab.export.naming import repetition_or_timestamp_tag
+from bmlab.export.selection import repetition_selected
 from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
     warp_local, get_point_to_pixel_matrix, write_transform_csv
 
@@ -30,7 +31,6 @@ class FluorescenceCombinedExport(object):
             return
 
         fluorescence_repetitions = self.file.repetition_keys(self.mode)
-        brillouin_windows = get_brillouin_windows(self.file)
 
         # Channels that we look for
         channels = ['red', 'green', 'blue']
@@ -55,17 +55,19 @@ class FluorescenceCombinedExport(object):
             if not image_keys:
                 continue
 
+            # See FluorescenceExport for what this tag means, why the
+            # first image speaks for the whole repetition, and why only
+            # a repetition actually tied to a Brillouin run is subject
+            # to the 'brillouin'/'repetitions' selection at all.
             keys_by_time = repetition.payload.image_keys(sort_by_time=True)
-            timing = classify_timing(
-                repetition.payload.get_date(keys_by_time[0]),
-                repetition.payload.get_date(keys_by_time[-1]),
-                brillouin_windows)
-            if timing:
-                timing_part = f"_{timing[1]}Acq" \
-                              f"_FLrep{fluorescence_repetition}" \
-                              f"_BMrep{timing[0]}"
-            else:
-                timing_part = f"_FLrep{fluorescence_repetition}"
+            brillouin_index = repetition.payload\
+                .get_brillouin_repetition_index(keys_by_time[0])
+            if brillouin_index is not None and not repetition_selected(
+                    configuration, str(brillouin_index)):
+                continue
+            tag = repetition_or_timestamp_tag(
+                repetition.payload, keys_by_time[0])
+            timing_part = f"{tag}_FLrep{fluorescence_repetition}"
 
             # Read first image of repetition,
             # so we can create an array to store the RGB data

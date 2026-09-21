@@ -18,6 +18,7 @@ from bmlab.models.setup import AVAILABLE_SETUPS
 from bmlab.models.calibration_model import CalibrationModel
 from bmlab.models.peak_selection_model import PeakSelectionModel
 from bmlab.models.evaluation_model import EvaluationModel
+from bmlab.models.background_model import BackgroundModel
 from bmlab.serializer import Serializer
 
 
@@ -140,6 +141,15 @@ class Session(Serializer):
     def set_current_repetition(self, rep_key):
         self._current_repetition_key = rep_key
 
+    def current_repetition_key(self):
+        """
+        Returns the repetition key currently selected in the data tab
+        (e.g. '0'), or None if none is selected - the key itself,
+        as opposed to current_repetition()'s Repetition object, for a
+        caller that only needs to tell whether the selection changed.
+        """
+        return self._current_repetition_key
+
     def extraction_model(self):
         """
         Returns ExtractionModel instance for currently selected repetition
@@ -154,6 +164,22 @@ class Session(Serializer):
 
     def evaluation_model(self):
         return self.evaluation_models.get(self._current_repetition_key)
+
+    def background_model(self):
+        return self.background_models.get(self._current_repetition_key)
+
+    def _current_background(self):
+        """
+        Returns the current repetition's Background instance (the
+        background reference points, see bmlab.file.Background), or
+        None if the current repetition has none - either because the
+        file predates the background-ROI feature, or because
+        useBackgroundRoiMask was off for that run.
+        """
+        rep = self.current_repetition()
+        if rep is None:
+            return None
+        return getattr(rep, 'background', None)
 
     def set_image_shape(self):
         """
@@ -251,6 +277,10 @@ class Session(Serializer):
                 key: EvaluationModel()
                 for key in self.file.repetition_keys()
             }
+            session.background_models = {
+                key: BackgroundModel()
+                for key in self.file.repetition_keys()
+            }
             self.set_image_shape()
             self.set_arc_width()
             # Initialize current setup
@@ -302,6 +332,47 @@ class Session(Serializer):
             return None
         return self.current_repetition()\
             .calibration.get_binning_factor(calib_key)
+
+    def get_background_keys(self, sort_by_time=False):
+        background = self._current_background()
+        if background is None:
+            return []
+        return background.image_keys(sort_by_time=sort_by_time)
+
+    def get_background_image(self, background_key, frame_num=None):
+        background = self._current_background()
+        if background is None:
+            return None
+        imgs = background.get_image(background_key)
+        if imgs is None:
+            return None
+        if frame_num is not None:
+            imgs = imgs[frame_num, ...]
+        return self.crop.apply(self.orientation.apply(imgs))
+
+    def get_background_time(self, background_key):
+        background = self._current_background()
+        if background is None:
+            return None
+        return background.get_time(background_key)
+
+    def get_background_exposure(self, background_key):
+        background = self._current_background()
+        if background is None:
+            return None
+        return background.get_exposure(background_key)
+
+    def get_background_position(self, background_key):
+        background = self._current_background()
+        if background is None:
+            return None
+        return background.get_position(background_key)
+
+    def get_background_stage_position(self, background_key):
+        background = self._current_background()
+        if background is None:
+            return None
+        return background.get_stage_position(background_key)
 
     def get_image_keys(self, sort_by_time=False):
         if self.current_repetition() is None:
@@ -362,48 +433,43 @@ class Session(Serializer):
 
     def current_fluorescence_repetition(self):
         """
-        Returns the Fluorescence-mode repetition captured *during*
-        the currently selected Brillouin repetition's own measurement
-        (by acquisition timing - see
-        bmlab.export.timing.classify_timing()), or None if there is
-        none.
+        Returns the Fluorescence-mode repetition holding the overview-
+        brightfield/per-point-brightfield images captured as part of
+        the currently selected Brillouin repetition, or None if there
+        is none.
 
-        This is NOT necessarily the Fluorescence repetition sharing
-        the same repetition key: BrillouinAcquisition starts a new
+        Each such image carries the owning Brillouin repetition's
+        index directly (see MeasurementData.
+        get_brillouin_repetition_index() - only on files from a
+        BrillouinAcquisition version that records it), so this is an
+        exact lookup, not a guess from comparing capture-time windows.
+        This is NOT necessarily the Fluorescence repetition sharing the
+        same repetition key: BrillouinAcquisition starts a new
         Fluorescence repetition alongside a Brillouin one specifically
         for its brightfield-overview images
         (saveOverviewBrightfieldPerZ), but Fluorescence's own
         repetition counter also advances for every standalone
-        Fluorescence capture triggered independently (e.g. a single
-        "before"/"after" snapshot) - so on a file with both kinds of
-        capture, the two counters drift apart and a same-key lookup
-        can silently return an unrelated Fluorescence repetition
-        instead. Falls back to the same-key repetition if timing
-        classification finds nothing (e.g. no Brillouin measurement
-        has any images yet to classify against), for graceful
-        degradation rather than always returning None.
+        Fluorescence capture triggered independently - so on a file
+        with both kinds of capture, the two counters drift apart and a
+        same-key lookup can silently return an unrelated Fluorescence
+        repetition instead. Falls back to the same-key repetition if no
+        image anywhere claims the current one (e.g. an older file that
+        predates the attribute), for graceful degradation rather than
+        always returning None.
         """
         if self.file is None or self._current_repetition_key is None:
             return None
-        # Local import: bmlab.export imports bmlab.session's own
-        # Session class at module load time (see e.g.
-        # fluorescence_export.py), so a module-level import here
-        # would be circular.
-        from bmlab.export.timing import get_brillouin_windows, \
-            classify_timing
-        brillouin_windows = get_brillouin_windows(self.file)
-        for fl_key in self.file.repetition_keys(FLUORESCENCE_GROUP):
-            fl_rep = self.file.get_repetition(fl_key, FLUORESCENCE_GROUP)
-            image_keys = fl_rep.payload.image_keys(sort_by_time=True)
-            if not image_keys:
-                continue
-            start = fl_rep.payload.get_date(image_keys[0])
-            end = fl_rep.payload.get_date(image_keys[-1])
-            timing = classify_timing(start, end, brillouin_windows)
-            if timing is not None \
-                    and timing[0] == self._current_repetition_key \
-                    and timing[1] == 'during':
-                return fl_rep
+        try:
+            current_index = int(self._current_repetition_key)
+        except ValueError:
+            current_index = None
+        if current_index is not None:
+            for fl_key in self.file.repetition_keys(FLUORESCENCE_GROUP):
+                fl_rep = self.file.get_repetition(fl_key, FLUORESCENCE_GROUP)
+                for image_key in fl_rep.payload.image_keys():
+                    if fl_rep.payload.get_brillouin_repetition_index(
+                            image_key) == current_index:
+                        return fl_rep
         if self._current_repetition_key in \
                 self.file.repetition_keys(FLUORESCENCE_GROUP):
             return self.file.get_repetition(
@@ -481,6 +547,7 @@ class Session(Serializer):
         self.calibration_models = {}
         self.evaluation_models = {}
         self.peak_selection_models = {}
+        self.background_models = {}
 
         self._current_repetition_key = None
 

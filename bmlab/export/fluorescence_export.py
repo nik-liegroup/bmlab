@@ -4,8 +4,9 @@ from PIL import Image
 
 from bmlab import Session
 from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL
-from bmlab.export.timing import get_brillouin_windows, classify_timing, \
+from bmlab.export.naming import repetition_or_timestamp_tag, \
     sanitize_for_filename
+from bmlab.export.selection import repetition_selected
 from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
     warp_local, get_point_to_pixel_matrix, write_transform_csv
 
@@ -27,7 +28,6 @@ class FluorescenceExport(object):
             return
 
         fluorescence_repetitions = self.file.repetition_keys(self.mode)
-        brillouin_windows = get_brillouin_windows(self.file)
 
         # Loop over all fluorescence repetitions
         for fluorescence_repetition in fluorescence_repetitions:
@@ -55,17 +55,29 @@ class FluorescenceExport(object):
                 for channel in set(channels_seen)}
             channel_occurrence = {}
 
+            # The Brillouin repetition every image here was captured as
+            # part of (see MeasurementData.get_brillouin_repetition_index())
+            # - or, for a standalone capture with no such repetition, its
+            # own timestamp instead (repetition_or_timestamp_tag()). All
+            # images in one Fluorescence repetition share the same
+            # relationship in practice, so the first one speaks for the
+            # whole repetition, same granularity the removed capture-
+            # time-overlap heuristic used.
             keys_by_time = repetition.payload.image_keys(sort_by_time=True)
-            timing = classify_timing(
-                repetition.payload.get_date(keys_by_time[0]),
-                repetition.payload.get_date(keys_by_time[-1]),
-                brillouin_windows)
-            if timing:
-                timing_part = f"_{timing[1]}Acq" \
-                              f"_FLrep{fluorescence_repetition}" \
-                              f"_BMrep{timing[0]}"
-            else:
-                timing_part = f"_FLrep{fluorescence_repetition}"
+            brillouin_index = repetition.payload\
+                .get_brillouin_repetition_index(keys_by_time[0])
+            # Restrict to the selected Brillouin repetitions (see
+            # ExportController.get_configuration()'s own
+            # 'brillouin'/'repetitions') the same way BrillouinExport
+            # does for the CSV - only when these images actually belong
+            # to one; a standalone capture with no such repetition is
+            # never excluded by that selection.
+            if brillouin_index is not None and not repetition_selected(
+                    configuration, str(brillouin_index)):
+                continue
+            tag = repetition_or_timestamp_tag(
+                repetition.payload, keys_by_time[0])
+            timing_part = f"{tag}_FLrep{fluorescence_repetition}"
 
             # Get the scale calibration
             scale_calibration = repetition.payload.get_scale_calibration()

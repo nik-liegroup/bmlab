@@ -1,5 +1,8 @@
 import pathlib
+import shutil
 
+import h5py
+import numpy as np
 import pytest
 
 from bmlab.session import Session, get_valid_source, \
@@ -195,3 +198,41 @@ def test_session_get_overview_brightfield():
 
     positions = session.get_overview_brightfield_positions()
     assert positions['tile_count'] == 2
+
+
+def test_session_current_fluorescence_repetition_by_brillouin_index(
+        tmp_path):
+    """
+    Regression test: current_fluorescence_repetition() must find the
+    right Fluorescence repetition via each image's own
+    brillouin_repetition_index (see MeasurementData.
+    get_brillouin_repetition_index()), not just by the two repetitions
+    happening to share the same key - SurfaceScan.h5's own Brillouin/
+    Fluorescence repetition '0'/'0' pairing could pass even with a
+    broken lookup, since same-key is also the fallback. Copies
+    SurfaceScan.h5 and relabels its Fluorescence repetition '0' as
+    belonging to Brillouin repetition '1' instead, so only a real
+    attribute-based lookup finds it.
+    """
+    fixture = tmp_path / 'SurfaceScan_relabeled.h5'
+    shutil.copy(data_file_path('SurfaceScan.h5'), fixture)
+
+    with h5py.File(fixture, 'r+') as f:
+        for idx in range(4):
+            ds = f[f'Fluorescence/0/payload/data/{idx}']
+            ds.attrs['brillouin_repetition_index'] = np.array([1])
+
+    session = Session.get_instance()
+    session.set_file(fixture)
+
+    # No Fluorescence repetition is keyed '1' (only '0' exists) and no
+    # image claims Brillouin repetition '5' either - only a real
+    # attribute-based match, not the same-key fallback, can find '1'.
+    session.set_current_repetition('1')
+    rep = session.current_fluorescence_repetition()
+    assert rep is not None
+    assert rep.payload.image_keys_by_channel(
+        'Brightfield z overview') == ['0', '1', '2', '3']
+
+    session.set_current_repetition('5')
+    assert session.current_fluorescence_repetition() is None

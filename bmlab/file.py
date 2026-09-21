@@ -242,6 +242,11 @@ class Repetition(object):
         # Having a calibration is optional for a repetition
         if calibration_group is not None:
             self.calibration = Calibration(calibration_group, self)
+        background_group = repetition_group.get('background')
+        # Having background reference points is optional for a repetition -
+        # only present when useBackgroundRoiMask was enabled for that run.
+        if background_group is not None:
+            self.background = Background(background_group, self)
         self.file = file
 
 
@@ -390,6 +395,22 @@ class MeasurementData(object):
         try:
             return self.data.get(image_key).attrs\
                 .get('channel')[0].decode('utf-8')
+        except Exception:
+            return None
+
+    def get_brillouin_repetition_index(self, image_key):
+        """
+        Returns the Brillouin repetition this Fluorescence-group image
+        (a per-z overview or per-point brightfield capture - see
+        OVERVIEW_BRIGHTFIELD_CHANNEL/PER_POINT_BRIGHTFIELD_CHANNEL) was
+        captured as part of, or None if it has none - either an older
+        file that predates this attribute, or a genuinely standalone
+        Fluorescence-tab "Acquire" capture, which was never part of any
+        Brillouin measurement to begin with.
+        """
+        try:
+            return int(self.data.get(image_key).attrs
+                       .get('brillouin_repetition_index')[0])
         except Exception:
             return None
 
@@ -781,6 +802,175 @@ class Payload(MeasurementData):
             data[key] = np.array(ds).flatten()[0] if ds is not None else None
         return data
 
+    # Background ROI polygon (BrillouinAcquisition's second, independent
+    # ROI - see the Background class for the reference points it
+    # captured). The drawn shape itself, not those points.
+    BACKGROUND_ROI = {
+        'polygon_x': 'positions-background-roi-polygon-x-um',
+        'polygon_y': 'positions-background-roi-polygon-y-um',
+    }
+
+    def get_background_roi(self):
+        """
+        Returns the background ROI polygon drawn at acquisition time,
+        or None if this file predates the feature entirely (no
+        'background-roi-mask-used' dataset at all).
+
+        Returns
+        -------
+        out: dict or None
+            'mask_used': bool, whether the background ROI was enabled
+                for this run.
+            'polygon_x'/'polygon_y': ndarray or None, the drawn
+                polygon's vertices (stage um, same grid-plan frame as
+                get_surface_scan_data()'s own 'roi_polygon_x'/'y') -
+                None if the ROI was never drawn (mask_used False) or
+                had fewer than 3 vertices.
+        """
+        if self.group is None:
+            return None
+        mask_used_ds = self.group.get('positions-background-roi-mask-used')
+        if mask_used_ds is None:
+            return None
+        data = {'mask_used': bool(np.array(mask_used_ds).flatten()[0])}
+        for key, dataset_name in self.BACKGROUND_ROI.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds) if ds is not None else None
+        return data
+
+    # Spectral proxy ROI(s) used for surface-follow autofocus scoring
+    # (Brillouin::estimateFrameMetric()) - up to two rectangles, each in
+    # the pixel coordinates of the camera frame (crop/binning) they were
+    # drawn against. SPECTRAL_PROXY_ROI_FRAME records that frame's own
+    # geometry, so a reader can remap a ROI onto a different frame the
+    # same way Brillouin::remapProxyRoi() does (a size-only rescale is
+    # only correct if both frames share the same sensor origin).
+    SPECTRAL_PROXY_ROI = {
+        1: 'positions-surface-proxy-roi-1-used',
+        2: 'positions-surface-proxy-roi-2-used',
+    }
+    SPECTRAL_PROXY_ROI_FRAME = {
+        1: 'positions-surface-proxy-roi-1-frame-used',
+        2: 'positions-surface-proxy-roi-2-frame-used',
+    }
+
+    def get_spectral_proxy_rois(self):
+        """
+        Returns the spectral proxy ROI(s) used for surface-follow
+        autofocus scoring, or None if this file predates the feature
+        entirely (no 'surface-proxy-roi-1-used' dataset at all).
+
+        Returns
+        -------
+        out: dict or None
+            {1: roi, 2: roi}, where each roi is a dict with 'left',
+            'top', 'width', 'height' (pixel coordinates in the frame
+            it was drawn against) and 'frame' (a dict with 'width',
+            'height', 'origin_left', 'origin_bottom', 'width_physical',
+            'height_physical'), or None if that ROI slot was never
+            drawn (width/height <= 0).
+        """
+        if self.group is None:
+            return None
+        rois = {}
+        for index, dataset_name in self.SPECTRAL_PROXY_ROI.items():
+            ds = self.group.get(dataset_name)
+            if ds is None:
+                return None
+            left, top, width, height = np.array(ds).flatten()
+            if width <= 0 or height <= 0:
+                rois[index] = None
+                continue
+            frame_ds = self.group.get(self.SPECTRAL_PROXY_ROI_FRAME[index])
+            frame = None
+            if frame_ds is not None:
+                (frame_width, frame_height, origin_left, origin_bottom,
+                 width_physical, height_physical) = \
+                    np.array(frame_ds).flatten()
+                frame = {
+                    'width': int(frame_width),
+                    'height': int(frame_height),
+                    'origin_left': int(origin_left),
+                    'origin_bottom': int(origin_bottom),
+                    'width_physical': int(width_physical),
+                    'height_physical': int(height_physical),
+                }
+            rois[index] = {
+                'left': int(left), 'top': int(top),
+                'width': int(width), 'height': int(height),
+                'frame': frame,
+            }
+        return rois
+
+    # General per-repetition acquisition settings, written unconditionally
+    # for every Brillouin repetition regardless of whether surface-follow
+    # was used (unlike SURFACE_SCAN_SETTINGS, which get_surface_scan_data()
+    # only returns when has_surface_scan() is True) - each individually
+    # None on a file old enough to predate that particular setting.
+    ACQUISITION_SETTINGS = {
+        'pre_calibration_used': 'positions-pre-calibration-used',
+        'post_calibration_used': 'positions-post-calibration-used',
+        'con_calibration_used': 'positions-con-calibration-used',
+        'con_calibration_interval_min_used':
+            'positions-con-calibration-interval-min-used',
+        'nr_calibration_images_used':
+            'positions-nr-calibration-images-used',
+        'calibration_exposure_time_s_used':
+            'positions-calibration-exposure-time-s-used',
+        'repetitions_count_used': 'positions-repetitions-count-used',
+        'repetitions_interval_min_used':
+            'positions-repetitions-interval-min-used',
+        'repetitions_file_per_repetition_used':
+            'positions-repetitions-file-per-repetition-used',
+        'overview_brightfield_save_per_z_used':
+            'positions-overview-brightfield-save-per-z-used',
+        'overview_brightfield_full_grid_used':
+            'positions-overview-brightfield-full-grid-used',
+        'overview_brightfield_full_stack_single_used':
+            'positions-overview-brightfield-full-stack-single-used',
+        'overview_brightfield_full_stack_mosaic_used':
+            'positions-overview-brightfield-full-stack-mosaic-used',
+        'overview_brightfield_exposure_ms_used':
+            'positions-overview-brightfield-exposure-ms-used',
+        'overview_brightfield_gain_used':
+            'positions-overview-brightfield-gain-used',
+        'use_grid_hysteresis_compensation_used':
+            'positions-use-grid-hysteresis-compensation-used',
+        'use_dose_protection_used': 'positions-use-dose-protection-used',
+        'capture_per_point_brightfield_used':
+            'positions-capture-per-point-brightfield-used',
+        'per_point_brightfield_every_n_used':
+            'positions-per-point-brightfield-every-n-used',
+        'per_point_brightfield_during_acquisition_used':
+            'positions-per-point-brightfield-during-acquisition-used',
+        'camera_frame_count_used': 'positions-camera-frame-count-used',
+        'camera_spurious_noise_filter_used':
+            'positions-camera-spurious-noise-filter-used',
+        'background_roi_mask_used': 'positions-background-roi-mask-used',
+    }
+
+    def get_acquisition_settings(self):
+        """
+        Returns the general per-repetition acquisition settings that
+        were actually used, or None if self.group is None. Each entry
+        is individually None if this file predates that particular
+        setting - unlike get_surface_scan_data(), this is not gated
+        behind has_surface_scan(), since none of these settings are
+        specific to surface-following.
+
+        Returns
+        -------
+        out: dict or None
+            See ACQUISITION_SETTINGS for the available keys.
+        """
+        if self.group is None:
+            return None
+        data = {}
+        for key, dataset_name in self.ACQUISITION_SETTINGS.items():
+            ds = self.group.get(dataset_name)
+            data[key] = np.array(ds).flatten()[0] if ds is not None else None
+        return data
+
     def has_overview_brightfield(self):
         """
         Returns whether stage positions for brightfield overview
@@ -951,6 +1141,39 @@ class Calibration(MeasurementData):
         """
         if self.data is None and payload_group is not None:
             self.data = payload_group.get('calibrationData')
+
+
+class Background(MeasurementData):
+
+    def __init__(self, payload_group, repetition):
+        """
+        Creates a background-reference-points representation from the
+        corresponding group of an HDF file (BrillouinAcquisition's second,
+        independent ROI - see its own settings.backgroundRoiPolygonUm).
+
+        Each image is a real Brillouin spectrum (same frame stack shape as
+        a regular payload point), captured after the main grid finishes and
+        stored under its own top-level "background" group - entirely
+        separate from "payload" (the main measurement grid, addressed by
+        BrillouinAcquisition's calculateIndex()) and from "calibration"
+        (the frequency-reference spectra). Background images are addressed
+        by a plain sequential key (like Calibration), not an (x, y, z) grid
+        index, so there is no possibility of a background point being
+        picked up by code that iterates the main grid's resolution-bounded
+        key range, or of it affecting frequency calibration.
+
+        image_keys()/get_image()/get_position()/get_stage_position()/
+        get_channel() are all inherited from MeasurementData - each image
+        carries its own target/stage position (µm) exactly like a
+        Fluorescence-mode or per-point-brightfield image does, since the
+        acquisition side writes it through the same FLUOIMAGE mechanism.
+
+        Parameters
+        ----------
+        payload_group : HDF group
+            The "background" group of a repetition from an HDF file.
+        """
+        super(Background, self).__init__(payload_group, repetition)
 
 
 class BadFileException(Exception):

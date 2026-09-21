@@ -1246,6 +1246,258 @@ def calculate_derived_values():
             shape_rayleigh[3], axis=3)
 
 
+class BackgroundController(ImageController):
+    """
+    Fits a repetition's background reference points (see
+    bmlab.file.Background) exactly like EvaluationController fits the
+    main payload grid - same per-repetition calibration
+    (cm.get_frequencies_by_time()), same extraction arc
+    (em.get_arc_by_time()) and the same Rayleigh/Brillouin regions
+    (peak_selection_model()) - the only structural difference is that
+    background points are a flat, ROI-drawn list (Brillouin::
+    backgroundGridPoints()), not a rectangular (x, y, z) grid, so
+    results are indexed by a flat point axis instead of by grid
+    indices, and only a single-peak fit is done (see BackgroundModel).
+    """
+
+    def __init__(self, *args, **kwargs):
+        session = Session.get_instance()
+        super(BackgroundController, self).__init__(
+            model=session.background_model,
+            get_image=session.get_background_image,
+            get_time=session.get_background_time,
+            get_exposure=session.get_background_exposure
+        )
+        return
+
+    def evaluate(self, abort=None, count=None, max_count=None):
+        em = self.session.extraction_model()
+        if not em:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
+        cm = self.session.calibration_model()
+        if not cm:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
+        pm = self.session.peak_selection_model()
+        if not pm:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
+        bgm = self.session.background_model()
+        if not bgm:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
+        point_keys = self.session.get_background_keys(sort_by_time=True)
+
+        if max_count is not None:
+            max_count.value = len(point_keys)
+
+        if not point_keys:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
+        brillouin_regions = pm.get_brillouin_regions()
+        rayleigh_regions = pm.get_rayleigh_regions()
+
+        # Get first spectrum to find number of images
+        spectra, _, _ = self.extract_spectra(point_keys[0])
+
+        if not spectra:
+            if max_count is not None:
+                max_count.value = -1
+            return
+
+        bgm.point_keys = point_keys
+        bgm.initialize_results_arrays({
+            'nr_points': len(point_keys),
+            'nr_images': len(spectra),
+            'nr_brillouin_regions': len(brillouin_regions),
+            'nr_rayleigh_regions': len(rayleigh_regions),
+        })
+
+        for idx, point_key in enumerate(point_keys):
+
+            if count is not None:
+                count.value += 1
+
+            if (abort is not None) and abort.value:
+                self.calculate_derived_values()
+                if max_count is not None:
+                    max_count.value = -1
+                return
+
+            position = self.session.get_background_position(point_key)
+            if position is not None:
+                for axis in ('x', 'y', 'z'):
+                    bgm.positions[axis][idx] = position[axis]
+            stage_position = \
+                self.session.get_background_stage_position(point_key)
+            if stage_position is not None:
+                for axis in ('x', 'y', 'z'):
+                    bgm.stage_positions[axis][idx] = stage_position[axis]
+
+            spectra, times, intensities = self.extract_spectra(point_key)
+            if spectra is None:
+                continue
+            bgm.results['time'][idx, :] = times
+            bgm.results['intensity'][idx, :] = intensities
+
+            frequencies = cm.get_frequencies_by_time(times)
+            # If we don't have frequency axis, we cannot evaluate on it
+            if frequencies is None:
+                continue
+            frequencies = list(frequencies)
+            bgm.set_frequencies(point_key, frequencies)
+
+            for region_key, region in enumerate(brillouin_regions):
+                results = EvaluationController.fit_spectra(
+                    spectra, frequencies, region)
+                for frame_num, _ in enumerate(spectra):
+                    ind = (idx, frame_num, region_key)
+                    bgm.results['brillouin_peak_position_f'][ind] = \
+                        results[frame_num][0]
+                    bgm.results['brillouin_peak_fwhm_f'][ind] = \
+                        results[frame_num][1]
+                    bgm.results['brillouin_peak_intensity'][ind] = \
+                        results[frame_num][2]
+                    bgm.results['brillouin_peak_offset'][ind] = \
+                        results[frame_num][3]
+                    bgm.results['brillouin_peak_snr'][ind] = \
+                        results[frame_num][4]
+                    bgm.results['brillouin_peak_nrmse'][ind] = \
+                        results[frame_num][5]
+                    bgm.results[
+                        'brillouin_peak_center_uncertainty'][ind] = \
+                        results[frame_num][6]
+
+            for region_key, region in enumerate(rayleigh_regions):
+                results = EvaluationController.fit_spectra(
+                    spectra, frequencies, region)
+                for frame_num, _ in enumerate(spectra):
+                    ind = (idx, frame_num, region_key)
+                    bgm.results['rayleigh_peak_position_f'][ind] = \
+                        results[frame_num][0]
+                    bgm.results['rayleigh_peak_fwhm_f'][ind] = \
+                        results[frame_num][1]
+                    bgm.results['rayleigh_peak_intensity'][ind] = \
+                        results[frame_num][2]
+                    bgm.results['rayleigh_peak_offset'][ind] = \
+                        results[frame_num][3]
+                    bgm.results['rayleigh_peak_snr'][ind] = \
+                        results[frame_num][4]
+                    bgm.results['rayleigh_peak_nrmse'][ind] = \
+                        results[frame_num][5]
+                    bgm.results[
+                        'rayleigh_peak_center_uncertainty'][ind] = \
+                        results[frame_num][6]
+
+            if not (idx % 10):
+                self.calculate_derived_values()
+
+        self.calculate_derived_values()
+
+        return
+
+    @staticmethod
+    def calculate_derived_values():
+        """
+        Computes brillouin_shift_f the same way controllers.
+        calculate_derived_values() does for the main payload grid: for
+        every Brillouin/Rayleigh region pair, the absolute difference
+        between their fitted positions, then the smallest of those per
+        Brillouin region - so a Brillouin peak is always matched to
+        its nearest Rayleigh peak without having to sort regions to
+        peaks by hand.
+        """
+        session = Session.get_instance()
+        bgm = session.background_model()
+        if not bgm:
+            return
+
+        if bgm.results['brillouin_peak_position_f'].size == 0:
+            return
+
+        if bgm.results['rayleigh_peak_position_f'].size == 0:
+            return
+
+        shape_brillouin = bgm.results['brillouin_peak_position_f'].shape
+        shape_rayleigh = bgm.results['rayleigh_peak_position_f'].shape
+
+        brillouin_shift_f = np.nan * np.ones(
+            (*shape_brillouin, shape_rayleigh[2]))
+        for idx in range(shape_rayleigh[2]):
+            brillouin_shift_f[:, :, :, idx] = abs(
+                bgm.results['brillouin_peak_position_f'] -
+                np.tile(
+                    bgm.results['rayleigh_peak_position_f'][:, :, [idx]],
+                    (1, 1, shape_brillouin[2])
+                )
+            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                action='ignore',
+                message='All-NaN slice encountered'
+            )
+            bgm.results['brillouin_shift_f'] = np.nanmin(
+                brillouin_shift_f, 3)
+
+    def get_data(self, parameter_key):
+        """
+        Returns the evaluated data for every background point,
+        averaged over frames and regions, together with each point's
+        own (x, y, z) target position - the background-point
+        equivalent of EvaluationController.get_data(), but for a flat
+        point list rather than a spatial grid (there is no resolution
+        to lay the points out on).
+
+        Parameters
+        ----------
+        parameter_key: str
+            The key of the parameter requested.
+            See bmlab.models.background_model.BackgroundModel.
+            get_parameter_keys()
+
+        Returns
+        -------
+        data: np.ndarray or None
+            1D array, one value per background point (in point_keys
+            order), or None if no evaluation has been run yet.
+        positions: dict or None
+            {'x': ndarray, 'y': ndarray, 'z': ndarray}, the target
+            position of each point, in the same order as `data`.
+        point_keys: list or None
+            The background image key each entry in `data` belongs to.
+        """
+        bgm = self.session.background_model()
+        if not bgm:
+            return None, None, None
+
+        data = bgm.results.get(parameter_key)
+        if data is None or data.size == 0:
+            return None, None, None
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                action='ignore',
+                message='Mean of empty slice'
+            )
+            data = np.nanmean(data, axis=tuple(range(1, data.ndim)))
+
+        data = bgm.parameters[parameter_key]['scaling'] * data
+
+        return data, bgm.positions, bgm.point_keys
+
+
 class Controller(object):
 
     def __init__(self):

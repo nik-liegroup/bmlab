@@ -3,5 +3,6 @@ from .extraction_model import ExtractionModel
 from .calibration_model import CalibrationModel
 from .peak_selection_model import PeakSelectionModel
 from .evaluation_model import EvaluationModel
+from .background_model import BackgroundModel
 from .orientation import Orientation
 from . import setup

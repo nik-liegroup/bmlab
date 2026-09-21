@@ -6,7 +6,8 @@ from PIL import Image
 from bmlab import Session
 from bmlab.file import OVERVIEW_BRIGHTFIELD_CHANNEL, BRIGHTFIELD_CHANNEL, \
     FLUORESCENCE_GROUP
-from bmlab.export.timing import get_brillouin_windows, classify_timing
+from bmlab.export.naming import repetition_or_timestamp_tag
+from bmlab.export.selection import repetition_selected
 from bmlab.export.alignment import get_tmatrix, get_pixels_per_um, \
     warp_local, um_offset_to_pixels, get_point_to_pixel_matrix, \
     write_transform_csv
@@ -34,17 +35,16 @@ class OverviewBrightfieldExport(object):
         if not config or not config.get('export'):
             return
 
-        brillouin_windows = get_brillouin_windows(self.file)
         fluorescence_repetitions = self.file.repetition_keys(self.mode)
 
         for repetition_key in fluorescence_repetitions:
             repetition = self.file.get_repetition(repetition_key, self.mode)
             # Sort by time so slice/tile order reflects acquisition
-            # order. A single-shot 'before' snapshot (BRIGHTFIELD_
-            # CHANNEL) and a z-stack/tile 'during'/'after' capture
-            # (OVERVIEW_BRIGHTFIELD_CHANNEL) never share one
-            # Fluorescence repetition in practice, but sorting the
-            # combined list by time keeps this correct even if they did.
+            # order. A single-shot snapshot (BRIGHTFIELD_CHANNEL) and a
+            # z-stack/tile capture (OVERVIEW_BRIGHTFIELD_CHANNEL) never
+            # share one Fluorescence repetition in practice, but sorting
+            # the combined list by time keeps this correct even if they
+            # did.
             image_keys = sorted(
                 repetition.payload.image_keys_by_channel(
                     OVERVIEW_BRIGHTFIELD_CHANNEL, sort_by_time=True) +
@@ -54,14 +54,30 @@ class OverviewBrightfieldExport(object):
             if not image_keys:
                 continue
 
-            dates = [repetition.payload.get_date(key) for key in image_keys]
-            timing = classify_timing(dates[0], dates[-1], brillouin_windows)
-            # Only one overview stack is ever written per Brillouin
-            # repetition (saveOverviewBrightfieldPerZ starts exactly one
-            # new Fluorescence repetition per Brillouin repetition), so
-            # the Fluorescence repetition index adds no information once
-            # the Brillouin repetition it belongs to is known.
-            tag = f"_BMrep{timing[0]}_{timing[1]}Acq" if timing else ''
+            # The Brillouin repetition this stack was captured as part
+            # of (see MeasurementData.get_brillouin_repetition_index())
+            # - every image in one overview/single-shot batch shares the
+            # same value, so the first one speaks for the whole batch.
+            # None for a standalone snapshot with no such repetition
+            # (repetition_or_timestamp_tag() then falls back to a
+            # timestamp tag instead).
+            brillouin_repetition_key = None
+            brillouin_index = repetition.payload\
+                .get_brillouin_repetition_index(image_keys[0])
+            if brillouin_index is not None:
+                brillouin_repetition_key = str(brillouin_index)
+                # Restrict to the selected Brillouin repetitions (see
+                # ExportController.get_configuration()'s own
+                # 'brillouin'/'repetitions') the same way BrillouinExport
+                # does for the CSV - only when this stack actually
+                # belongs to one; a standalone snapshot with no such
+                # repetition is never excluded by that selection, since
+                # there is no repetition choice for it to be excluded by.
+                if not repetition_selected(
+                        configuration, brillouin_repetition_key):
+                    continue
+            tag = repetition_or_timestamp_tag(repetition.payload,
+                                              image_keys[0])
 
             path = self._plot_path()
             scale_calibration = repetition.payload.get_scale_calibration()
@@ -82,13 +98,13 @@ class OverviewBrightfieldExport(object):
             # this is without guessing from the data itself. These
             # datasets are written into the *Brillouin* repetition's own
             # payload by runMeasurementPhase(), not the Fluorescence
-            # repetition the images themselves live in - timing[0]
-            # (already computed above) is that Brillouin repetition's
-            # key, since this is always a 'duringAcq' association for an
-            # overview-carrying Fluorescence repetition.
+            # repetition the images themselves live in - hence needing
+            # brillouin_repetition_key (already resolved above) to reach
+            # them at all.
             overview_positions = None
-            if timing:
-                bm_repetition = self.file.get_repetition(timing[0])
+            if brillouin_repetition_key is not None:
+                bm_repetition = \
+                    self.file.get_repetition(brillouin_repetition_key)
                 overview_positions = \
                     bm_repetition.payload.get_overview_brightfield_positions()
             total_per_z = \
