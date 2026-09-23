@@ -1,3 +1,42 @@
+## 0.14.0 - Unreleased
+### Added
+- feat(evaluation): second Brillouin shift quantity,
+  `brillouin_shift_f_stokes_anti_stokes`, computed from the distance
+  between the Stokes and Anti-Stokes Brillouin peaks instead of relative
+  to the Rayleigh peak, corrected for the VIPA spectrum's free spectral
+  range (FSR, taken from the calibration fit - not this frame's own
+  Rayleigh peaks) - only defined when exactly 2 Brillouin regions are
+  selected and a calibration is available. Kept alongside the existing
+  Rayleigh-referenced `brillouin_shift_f`, for both the main evaluation
+  grid and background points.
+- feat(session): derived values (`brillouin_shift_f` and friends) are now
+  recomputed from already-stored peak fits when a session file is
+  loaded, so a previously-evaluated repetition picks up new/changed
+  derived quantities without re-fitting.
+- feat(evaluation): `EvaluationModel.evaluation_mode` ('single', the
+  default, or 'sum') - in 'sum' mode, camera frame repeats at each point
+  are additionally interpolated onto a common frequency axis, summed,
+  and fit once, and that single sum-fit becomes the reported value for
+  every fit-derived quantity, instead of averaging the separately-fit
+  per-frame values - while still fitting every frame separately
+  underneath, so `brillouin_shift_frame_spread`/
+  `rayleigh_shift_frame_spread` and the other quality diagnostics keep
+  working unchanged.
+- feat(evaluation): `EvaluationController.get_fits_combined()` and
+  `get_combined_spectrum()`, for viewers (e.g. BMicro's per-pixel
+  spectrum dialog) to show the 'sum'-mode combined fit/spectrum for a
+  point alongside its per-frame fits/spectra.
+- feat(session): support BrillouinAcquisition's adaptive frame extension
+  - a per-point HDF5 dataset carrying a `frames_actual` attribute smaller
+    than its own frame-count dimension (padded to accommodate a variable
+    number of extra low-signal frames) now has its trailing, unused
+    padded slots trimmed off in `MeasurementData.get_image()`/
+    `get_image_count()` (`bmlab/file.py`), before any evaluation code
+    (`ImageController.extract_spectra()` and everything derived from
+    `len(imgs)`) ever sees the array. Files without the attribute
+    (written before this feature, or with it unused) are read exactly
+    as before.
+
 ## 0.13.0 - 2026-09-10
 ### Added
 - feat(evaluation): fit-quality diagnostics (SNR, NRMSE, peak-center

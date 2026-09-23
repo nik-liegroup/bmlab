@@ -663,3 +663,19 @@ class Session(Serializer):
                     []
                 )
                 delattr(psm, 'rayleigh_regions')
+
+            # Recompute derived values (brillouin_shift_f and friends,
+            # including brillouin_shift_f_stokes_anti_stokes) from
+            # whatever peak positions are already fitted and stored, so a
+            # previously-evaluated repetition picks up new/changed
+            # derived quantities on load without re-fitting any spectra.
+            # Deferred import: controllers.py imports Session from
+            # bmlab/__init__.py, which imports this module, so importing
+            # controllers at module level here would be circular.
+            from bmlab.controllers import calculate_derived_values, \
+                BackgroundController
+            if evm.results['brillouin_peak_position_f'].size:
+                calculate_derived_values()
+            bgm = session.background_model()
+            if bgm and bgm.results['brillouin_peak_position_f'].size:
+                BackgroundController.calculate_derived_values()

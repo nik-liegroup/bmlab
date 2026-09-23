@@ -135,6 +135,38 @@ def test_background_model_serialization_round_trip(tmp_path):
     assert bgm.positions['x'][0] == 1.0
 
 
+def test_background_calculate_derived_values_stokes_anti_stokes():
+    """
+    Same FSR-corrected Stokes/Anti-Stokes-distance shift as
+    test_evaluation_controller.test_calculate_derived_values_stokes_anti_
+    stokes(), for the background-point shape (no peak-index axis).
+    """
+    session = Session.get_instance()
+    session.set_file(data_file_path('Water.h5'))
+    session.set_current_repetition('0')
+    bgm = session.background_model()
+    cm = session.calibration_model()
+    cm.vipa_params['0'] = [(0, 0, 0, 20)]
+
+    bgm.initialize_results_arrays({
+        'nr_points': 3,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_rayleigh_regions': 2,
+    })
+
+    # Stokes region at 2, Anti-Stokes region at 14 -> distance 12,
+    # shift = (FSR - distance) / 2 = (20 - 12) / 2 = 4.
+    bgm.results['brillouin_peak_position_f'][:, :, 0] = 2
+    bgm.results['brillouin_peak_position_f'][:, :, 1] = 14
+    bgm.results['rayleigh_peak_position_f'][:] = 100
+
+    BackgroundController.calculate_derived_values()
+
+    key = 'brillouin_shift_f_stokes_anti_stokes'
+    assert (bgm.results[key] == 4).all()
+
+
 def test_background_controller_evaluate_without_background_points():
     """
     A repetition whose background group has no points at all (either

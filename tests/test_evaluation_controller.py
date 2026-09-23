@@ -3,12 +3,49 @@ import numpy as np
 
 import pytest
 
-from bmlab.controllers import EvaluationController, calculate_derived_values
-from bmlab.models import CalibrationModel, EvaluationModel
+from bmlab.controllers import EvaluationController, calculate_derived_values, \
+    ExtractionController, CalibrationController, PeakSelectionController
+from bmlab.models import CalibrationModel, EvaluationModel, Orientation
+from bmlab.models.setup import AVAILABLE_SETUPS
 
 
 def data_file_path(file_name):
     return pathlib.Path(__file__).parent / 'data' / file_name
+
+
+def _setup_and_evaluate(evaluation_mode, file_name='Water.h5'):
+    """
+    Runs the same pipeline as tests/test_run_bmlab_pipeline.py's
+    run_pipeline() (real spectra from `file_name`, not a hand-built
+    results array), except it sets evm.evaluation_mode before
+    evc.evaluate() runs, and returns the controller/model so the test
+    can inspect the '_combined' backing arrays directly.
+    """
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path(file_name))
+    evc.session.set_current_repetition('0')
+    evc.session.set_setup(AVAILABLE_SETUPS[0])
+    evc.session.orientation = Orientation(rotation=1, reflection={
+        'vertically': False, 'horizontally': False})
+
+    ec = ExtractionController()
+    cc = CalibrationController()
+    psc = PeakSelectionController()
+
+    ec.find_points_all()
+    for calib_key in evc.session.get_calib_keys():
+        cc.find_peaks(calib_key)
+        cc.calibrate(calib_key)
+
+    psc.add_brillouin_region_frequency((4.0e9, 6.0e9))
+    psc.add_brillouin_region_frequency((9.0e9, 11.0e9))
+    psc.add_rayleigh_region_frequency((-2.0e9, 2.0e9))
+    psc.add_rayleigh_region_frequency((13.0e9, 17.0e9))
+
+    evm = evc.session.evaluation_model()
+    evm.evaluation_mode = evaluation_mode
+    evc.evaluate()
+    return evc, evm
 
 
 def test_get_key_from_indices():
@@ -168,6 +205,113 @@ def test_calculate_derived_values_equal_region_count_nr_peaks_2():
     assert (evm.results['brillouin_shift_f'][:, :, :, :, 1, 0] == 4).all()
     assert (evm.results['brillouin_shift_f'][:, :, :, :, 0, 1] == 3).all()
     assert (evm.results['brillouin_shift_f'][:, :, :, :, 1, 1] == 3).all()
+
+
+def test_calculate_derived_values_stokes_anti_stokes():
+    """
+    Brillouin shift from the distance between the two Brillouin
+    (Stokes/Anti-Stokes) peaks, corrected for the VIPA spectrum's free
+    spectral range (FSR): since the Anti-Stokes peak sits near the
+    *next* Rayleigh order, distance(Anti-Stokes, Stokes) = FSR - 2 *
+    shift, not 2 * shift. Only defined for exactly 2 Brillouin regions,
+    and does not depend on this frame's own (possibly noisy) Rayleigh
+    peak position - only on the FSR from the calibration fit.
+    """
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path('Water.h5'))
+    evc.session.set_current_repetition('0')
+    evm = evc.session.evaluation_model()
+    cm = evc.session.calibration_model()
+    # FSR = 20 (arbitrary units, same as the peak positions below) -
+    # a fixed calibration/instrument property, not a per-frame fit.
+    cm.vipa_params['0'] = [(0, 0, 0, 20)]
+
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 2,
+    })
+
+    # Stokes region at 2, Anti-Stokes region at 14 -> distance 12,
+    # shift = (FSR - distance) / 2 = (20 - 12) / 2 = 4.
+    # Rayleigh peaks are set far off from the true laser line to show
+    # the result does not depend on them.
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, :] = 2
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, :] = 14
+    evm.results['rayleigh_peak_position_f'][:] = 100
+
+    calculate_derived_values()
+
+    key = 'brillouin_shift_f_stokes_anti_stokes'
+    assert (evm.results[key][:, :, :, :, 0, :] == 4).all()
+    assert (evm.results[key][:, :, :, :, 1, :] == 4).all()
+
+
+def test_calculate_derived_values_stokes_anti_stokes_wrong_region_count():
+    """
+    The Stokes/Anti-Stokes shift is only defined for exactly 2 Brillouin
+    regions - with any other count, it must be left NaN rather than
+    guessing.
+    """
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path('Water.h5'))
+    evc.session.set_current_repetition('0')
+    evm = evc.session.evaluation_model()
+    cm = evc.session.calibration_model()
+    cm.vipa_params['0'] = [(0, 0, 0, 20)]
+
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 3,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 2,
+    })
+
+    evm.results['brillouin_peak_position_f'][:] = 1
+    evm.results['rayleigh_peak_position_f'][:] = 3
+
+    calculate_derived_values()
+
+    assert np.isnan(
+        evm.results['brillouin_shift_f_stokes_anti_stokes']).all()
+
+
+def test_calculate_derived_values_stokes_anti_stokes_no_calibration():
+    """
+    Without a fitted calibration (no FSR available), the Stokes/Anti-
+    Stokes shift must be left NaN rather than falling back to some
+    other assumption.
+    """
+    evc = EvaluationController()
+    evc.session.set_file(data_file_path('Water.h5'))
+    evc.session.set_current_repetition('0')
+    evm = evc.session.evaluation_model()
+
+    evm.initialize_results_arrays({
+        'dim_x': 5,
+        'dim_y': 5,
+        'dim_z': 5,
+        'nr_images': 2,
+        'nr_brillouin_regions': 2,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 2,
+    })
+
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 0, :] = 2
+    evm.results['brillouin_peak_position_f'][:, :, :, :, 1, :] = 14
+    evm.results['rayleigh_peak_position_f'][:] = 100
+
+    calculate_derived_values()
+
+    assert np.isnan(
+        evm.results['brillouin_shift_f_stokes_anti_stokes']).all()
 
 
 def test_calculate_derived_values_quality_metrics():
@@ -974,3 +1118,187 @@ def test_create_bounds_fwhm(mocker):
             [[0, 0.9e9], [2.0e9, np.inf], [0, np.inf]]
         ]
     ], fit_bounds_fwhm, atol=1e6)
+
+
+def test_evaluation_mode_default_is_single():
+    evm = EvaluationModel()
+    assert evm.evaluation_mode == 'single'
+
+
+def test_evaluation_mode_single_preserves_current_behavior():
+    """
+    (a) Regression-safety: the default 'single' mode must reproduce
+    exactly the pre-existing behavior (get_data() is the nanmean,
+    across frames, of each frame's own separately-fit peak position),
+    unaffected by the new (harmless, unwritten-to) '_combined' backing
+    arrays that initialize_results_arrays() now always allocates.
+    """
+    evc, evm = _setup_and_evaluate('single')
+
+    shift, _, _, _ = evc.get_data('brillouin_shift_f')
+    assert shift.size != 0
+    np.testing.assert_allclose(shift[~np.isnan(shift)], 5.03, atol=0.05)
+
+    # The combined backing arrays exist but were never written to in
+    # 'single' mode - stay all-NaN.
+    assert np.all(
+        np.isnan(evm.results['brillouin_peak_position_f_combined']))
+    assert np.all(np.isnan(evm.results['brillouin_shift_f_combined']))
+
+
+def test_evaluation_mode_sum_uses_combined_fit():
+    """
+    (b) 'sum' mode: the combined-fit backing arrays get populated by
+    evaluate(), and get_data() transparently redirects to them (same
+    physical result as 'single' mode here, since Water.h5's frames are
+    all clean measurements of the same peak).
+    """
+    evc, evm = _setup_and_evaluate('sum')
+
+    assert not np.all(
+        np.isnan(evm.results['brillouin_peak_position_f_combined']))
+    assert not np.all(
+        np.isnan(evm.results['rayleigh_peak_position_f_combined']))
+
+    shift, _, _, _ = evc.get_data('brillouin_shift_f')
+    assert shift.size != 0
+    np.testing.assert_allclose(shift[~np.isnan(shift)], 5.03, atol=0.05)
+
+
+def test_evaluation_mode_sum_preserves_frame_spread_qc():
+    """
+    (c) 'sum' mode must not break the frame-spread QC diagnostic: every
+    frame is still fit separately underneath (see evaluate()), so
+    brillouin_shift_frame_spread/rayleigh_shift_frame_spread are still
+    computed and non-trivial (not all-NaN), exactly as in 'single'
+    mode.
+    """
+    evc, evm = _setup_and_evaluate('sum')
+
+    for key in ('brillouin_shift_frame_spread',
+                'rayleigh_shift_frame_spread'):
+        data = evm.results[key]
+        assert data.size != 0
+        finite = data[~np.isnan(data)]
+        assert finite.size > 0, f'{key} is all-NaN in sum mode'
+
+
+def test_evaluation_mode_sum_recovers_true_center_at_least_as_well():
+    """
+    (b) On noisy synthetic multi-frame data, fitting the sum of the
+    frames' spectra (EvaluationController.fit_spectrum_combined())
+    should recover the true peak center at least as well as averaging
+    the separately-fit per-frame centers (EvaluationController.
+    fit_spectra(), the 'single'-mode behavior) - the statistical
+    motivation for 'sum' mode (closer to a sufficient statistic for
+    the shared peak position under Poisson counting statistics).
+    """
+    rng = np.random.default_rng(0)
+    x = np.linspace(-5, 5, 200)
+    true_w0 = 0.3
+    true_fwhm = 1.0
+    true_intensity = 50.0
+    # A comfortably positive offset (rather than e.g. 2.0) keeps the
+    # summed-spectrum's edge samples - summing 5 frames' worth of noise
+    # raises their variance well above a single frame's - from wandering
+    # negative, which would otherwise occasionally violate fit_lorentz's
+    # own offset >= 0 initial-guess bound and make this test flaky.
+    true_offset = 10.0
+
+    def lorentzian(xx):
+        return true_offset + true_intensity * (
+            (true_fwhm / 2) ** 2 /
+            ((xx - true_w0) ** 2 + (true_fwhm / 2) ** 2))
+
+    n_frames = 5
+    noise_sigma = 4.0
+    frames = [lorentzian(x) + rng.normal(0, noise_sigma, x.size)
+              for _ in range(n_frames)]
+    frequencies = [x for _ in range(n_frames)]
+    region = (x[0], x[-1])
+
+    # Per-frame fits, naively averaged - the 'single'-mode behavior.
+    per_frame_fits = EvaluationController.fit_spectra(
+        frames, frequencies, region)
+    naive_average = np.nanmean([f[0] for f in per_frame_fits])
+
+    # Sum-then-fit - the 'sum'-mode behavior.
+    combined_fit = EvaluationController.fit_spectrum_combined(
+        frames, frequencies, region)
+    combined_center = combined_fit[0]
+
+    assert abs(combined_center - true_w0) <= \
+        abs(naive_average - true_w0) + 0.05
+
+
+def test_combine_spectra_sums_interpolated_frames():
+    """
+    _combine_spectra() must: (1) use frequencies[0] as the reference
+    axis, (2) correctly interpolate a frame whose frequency axis runs
+    in the opposite (decreasing) direction, and (3) not let a single
+    NaN pixel in one frame poison the sum at that pixel in every other
+    frame (np.nansum-style per-pixel handling).
+    """
+    from bmlab.controllers import _combine_spectra
+
+    reference = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    frame0 = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    # Same physical spectrum, but frequency axis decreasing.
+    frame1_freq = reference[::-1]
+    frame1 = frame0[::-1]
+    # A third frame with a NaN at its lowest-frequency pixel - masking
+    # it out (rather than e.g. propagating it) shrinks that frame's
+    # usable frequency range, so at the reference axis's own lowest
+    # point (freq=0, now outside frame2's masked range) frame2
+    # contributes nothing (np.interp's left=np.nan) instead of a
+    # fabricated/extrapolated value.
+    frame2 = np.array([np.nan, 2.0, 3.0, 4.0, 5.0])
+
+    summed, ref_out = _combine_spectra(
+        [frame0, frame1, frame2],
+        [reference, frame1_freq, reference])
+
+    np.testing.assert_allclose(ref_out, reference)
+    # Pixel 0 (freq=0): frame0 = 1, frame1 (interpolated back) = 1,
+    # frame2 = NaN (out of its masked range) -> sum of the two valid
+    # frames only, not a NaN-poisoned/fabricated-zero result.
+    np.testing.assert_allclose(summed[0], 2.0)
+    # Every other pixel: all three frames have valid, agreeing data.
+    np.testing.assert_allclose(summed[1], 6.0)
+    np.testing.assert_allclose(summed[2], 9.0)
+
+
+def test_post_deserialize_migrates_evaluation_mode_and_combined_keys():
+    """
+    (d) An old saved session predating evaluation_mode/the '_combined'
+    results keys must migrate cleanly: evaluation_mode defaults to
+    'single' and every '_combined' key is backfilled as an all-NaN
+    array shaped like its non-combined sibling.
+    """
+    evm = EvaluationModel()
+    evm.initialize_results_arrays({
+        'dim_x': 2,
+        'dim_y': 2,
+        'dim_z': 1,
+        'nr_images': 2,
+        'nr_brillouin_regions': 1,
+        'nr_brillouin_peaks': 1,
+        'nr_rayleigh_regions': 1,
+    })
+
+    # Simulate a pre-0.14.0 session: no evaluation_mode attribute, and
+    # none of the '_combined' result keys.
+    del evm.evaluation_mode
+    combined_keys = [key for key in evm.results if key.endswith('_combined')]
+    assert combined_keys, 'no _combined keys to migrate - test is stale'
+    for key in combined_keys:
+        del evm.results[key]
+
+    evm.post_deserialize()
+
+    assert evm.evaluation_mode == 'single'
+    for key in combined_keys:
+        assert key in evm.results
+        assert evm.results[key].shape == \
+            evm.results[key.replace('_combined', '')].shape
+        assert np.all(np.isnan(evm.results[key]))

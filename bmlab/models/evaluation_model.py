@@ -31,6 +31,24 @@ class EvaluationModel(Serializer):
         # that method's docstring for where those numbers come from.
         self.quality_thresholds = self.get_default_quality_thresholds()
 
+        # @since 0.14.0
+        # How multiple camera "frame repeats" at the same measurement
+        # point are combined into the reported fit values:
+        # 'single' (default) - every frame is fit separately and the
+        #   reported value is the nanmean across frames, exactly as
+        #   before this setting existed. Existing/new sessions default
+        #   here so nothing changes unless a user opts in.
+        # 'sum' - every frame is still fit separately (unchanged - this
+        #   still feeds brillouin_shift_frame_spread/
+        #   rayleigh_shift_frame_spread and the raw per-frame time/
+        #   intensity, so the frame-spread QC diagnostic keeps working),
+        #   but the frames' spectra are additionally interpolated onto
+        #   a common frequency axis, summed, and fit once - the
+        #   reported value for every fit-derived quantity then comes
+        #   from that single sum-fit instead of the per-frame nanmean
+        #   (see EvaluationController.get_data()'s '_combined' redirect).
+        self.evaluation_mode = 'single'
+
         self.results = {}
         for key in self.parameters.keys():
             self.results[key] = np.empty((0,))
@@ -133,6 +151,33 @@ class EvaluationModel(Serializer):
         if not hasattr(self, 'quality_thresholds'):
             self.quality_thresholds = self.get_default_quality_thresholds()
 
+        # Migrations from 0.13.0 to 0.14.0
+        # @since 0.14.0
+        if 'brillouin_shift_f_stokes_anti_stokes' not in self.results:
+            self.results['brillouin_shift_f_stokes_anti_stokes'] = np.full(
+                self.results['brillouin_peak_position_f'].shape, np.nan)
+        if not hasattr(self, 'evaluation_mode'):
+            self.evaluation_mode = 'single'
+        for key in (
+                'brillouin_peak_position_f', 'brillouin_peak_fwhm_f',
+                'brillouin_peak_intensity', 'brillouin_peak_offset',
+                'brillouin_peak_snr', 'brillouin_peak_nrmse',
+                'brillouin_peak_center_uncertainty', 'brillouin_shift_f',
+                'brillouin_shift_f_stokes_anti_stokes'):
+            combined_key = key + '_combined'
+            if combined_key not in self.results:
+                self.results[combined_key] = np.full(
+                    self.results[key].shape, np.nan)
+        for key in (
+                'rayleigh_peak_position_f', 'rayleigh_peak_fwhm_f',
+                'rayleigh_peak_intensity', 'rayleigh_peak_offset',
+                'rayleigh_peak_snr', 'rayleigh_peak_nrmse',
+                'rayleigh_peak_center_uncertainty'):
+            combined_key = key + '_combined'
+            if combined_key not in self.results:
+                self.results[combined_key] = np.full(
+                    self.results[key].shape, np.nan)
+
     def invalidate_results(self):
         for key in self.parameters:
             self.results[key][:] = np.nan
@@ -144,6 +189,17 @@ class EvaluationModel(Serializer):
                 'unit': 'GHz',
                 'symbol': r'$\nu_\mathrm{B}$',
                 'label': 'Brillouin frequency shift',
+                'scaling': 1e-9,
+            },
+            'brillouin_shift_f_stokes_anti_stokes': {
+                # [GHz] Brillouin frequency shift computed from half the
+                # distance between the Stokes and Anti-Stokes Brillouin
+                # peaks, independent of the Rayleigh peak fit - only
+                # defined when exactly 2 Brillouin regions are selected
+                # (see calculate_derived_values()).
+                'unit': 'GHz',
+                'symbol': r'$\nu_\mathrm{B,SA}$',
+                'label': 'Brillouin frequency shift (Stokes-Anti-Stokes)',
                 'scaling': 1e-9,
             },
             'brillouin_peak_fwhm_f': {      # [GHz] Brillouin peak FWHM
@@ -318,12 +374,12 @@ class EvaluationModel(Serializer):
 
         brillouin_shift_frame_spread's 0.2 GHz max is the one
         empirically grounded number here: inspecting a real dataset
-        (Xenopus brain tissue, 1938 measured points) showed a clean
-        bimodal split - a well-behaved cluster from 0-0.12 GHz, a
-        near-empty gap, then a distinct population of clear fit
-        failures from 1.7-2.9 GHz - and 0.2 GHz sits right in that
-        gap. rayleigh_shift_frame_spread mirrors it, since it's the
-        same reproducibility check on the other peak. SNR >= 5 and
+        (1938 measured points) showed a clean bimodal split - a
+        well-behaved cluster from 0-0.12 GHz, a near-empty gap, then
+        a distinct population of clear fit failures from 1.7-2.9 GHz
+        - and 0.2 GHz sits right in that gap. rayleigh_shift_frame_spread
+        mirrors it, since it's the same reproducibility check on the
+        other peak. SNR >= 5 and
         center_uncertainty <= 0.08 GHz are user-set starting points.
         NRMSE's default (residual <= peak amplitude) is a physically-
         reasoned starting point, not yet checked against real data the
@@ -395,6 +451,10 @@ class EvaluationModel(Serializer):
         self.results['brillouin_shift_f'] = np.empty(shape_brillouin)
         self.results['brillouin_shift_f'][:] = np.nan
 
+        self.results['brillouin_shift_f_stokes_anti_stokes'] = np.empty(
+            shape_brillouin)
+        self.results['brillouin_shift_f_stokes_anti_stokes'][:] = np.nan
+
         self.results['brillouin_peak_fwhm_f'] = np.empty(shape_brillouin)
         self.results['brillouin_peak_fwhm_f'][:] = np.nan
 
@@ -426,6 +486,24 @@ class EvaluationModel(Serializer):
         self.results['brillouin_shift_frame_spread'] = np.empty(
             shape_brillouin)
         self.results['brillouin_shift_frame_spread'][:] = np.nan
+
+        # @since 0.14.0
+        # 'sum'-mode backing store (see evaluation_mode in __init__):
+        # holds the single sum-fit's value for each of the fit-derived
+        # Brillouin quantities, broadcast across the frame axis by
+        # EvaluationController.evaluate(). Not registered in
+        # get_default_parameters() - invisible to the GUI's parameter
+        # dropdown - EvaluationController.get_data() transparently
+        # redirects to these when evaluation_mode == 'sum' instead.
+        # Stay all-NaN (and thus harmless) in 'single' mode.
+        for key in (
+                'brillouin_peak_position_f', 'brillouin_peak_fwhm_f',
+                'brillouin_peak_intensity', 'brillouin_peak_offset',
+                'brillouin_peak_snr', 'brillouin_peak_nrmse',
+                'brillouin_peak_center_uncertainty', 'brillouin_shift_f',
+                'brillouin_shift_f_stokes_anti_stokes'):
+            self.results[key + '_combined'] = np.empty(shape_brillouin)
+            self.results[key + '_combined'][:] = np.nan
 
         shape_rayleigh = (
             dims['dim_x'],
@@ -466,6 +544,15 @@ class EvaluationModel(Serializer):
         self.results['rayleigh_shift_frame_spread'] = np.empty(
             shape_rayleigh)
         self.results['rayleigh_shift_frame_spread'][:] = np.nan
+
+        # 'sum'-mode backing store - see the Brillouin block above.
+        for key in (
+                'rayleigh_peak_position_f', 'rayleigh_peak_fwhm_f',
+                'rayleigh_peak_intensity', 'rayleigh_peak_offset',
+                'rayleigh_peak_snr', 'rayleigh_peak_nrmse',
+                'rayleigh_peak_center_uncertainty'):
+            self.results[key + '_combined'] = np.empty(shape_rayleigh)
+            self.results[key + '_combined'][:] = np.nan
 
         # Quality-threshold pass/fail mask, only ever (re-)populated by
         # apply_quality_thresholds(). Reset it here too so a re-evaluate
@@ -508,6 +595,33 @@ class EvaluationModel(Serializer):
                 self.results['rayleigh_peak_intensity'][
                 ind_x, ind_y, ind_z, :, :, :],
                 self.results['rayleigh_peak_offset'][
+                ind_x, ind_y, ind_z, :, :, :])
+
+    def get_fits_combined(self, ind_x, ind_y, ind_z):
+        """
+        Like get_fits(), but reads the 'sum'-mode combined-fit arrays
+        (see `evaluation_mode`) instead of the per-frame ones - only
+        meaningful (non-NaN) for a point that was evaluated while
+        evaluation_mode == 'sum'; a point evaluated in 'single' mode,
+        or never evaluated, returns all-NaN here regardless of the
+        model's *current* evaluation_mode, since these arrays are
+        only ever populated by evaluate() itself.
+        """
+        return (self.results['brillouin_peak_position_f_combined'][
+               ind_x, ind_y, ind_z, :, :, :],
+               self.results['brillouin_peak_fwhm_f_combined'][
+               ind_x, ind_y, ind_z, :, :, :],
+               self.results['brillouin_peak_intensity_combined'][
+               ind_x, ind_y, ind_z, :, :, :],
+               self.results['brillouin_peak_offset_combined'][
+               ind_x, ind_y, ind_z, :, :, :]), \
+               (self.results['rayleigh_peak_position_f_combined'][
+                ind_x, ind_y, ind_z, :, :, :],
+                self.results['rayleigh_peak_fwhm_f_combined'][
+                ind_x, ind_y, ind_z, :, :, :],
+                self.results['rayleigh_peak_intensity_combined'][
+                ind_x, ind_y, ind_z, :, :, :],
+                self.results['rayleigh_peak_offset_combined'][
                 ind_x, ind_y, ind_z, :, :, :])
 
     def get_parameter_keys(self):

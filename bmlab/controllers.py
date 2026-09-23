@@ -421,6 +421,75 @@ class PeakSelectionController(object):
         psm.add_rayleigh_region(region_frequency)
 
 
+def _combine_spectra(spectra, frequencies):
+    """
+    'sum'-mode helper (see EvaluationModel.evaluation_mode): interpolates
+    every frame's spectrum onto a common frequency axis - frequencies[0],
+    the reference - and sums them elementwise, the "sum-then-fit"
+    counterpart to fitting each frame separately (closer to a sufficient
+    statistic for the shared peak position under Poisson counting
+    statistics than averaging separately-fit shifts, especially at low
+    SNR).
+
+    Frequencies are not guaranteed to be increasing along the pixel axis
+    (the VIPA dispersion direction isn't fixed by this code), so each
+    frame's (frequency, spectrum) pair is sorted by frequency before
+    calling np.interp, which requires an increasing `xp`. NaNs in a
+    frame's spectrum or frequency axis are masked out per-frame before
+    interpolating (the same approach fit_lorentz_region uses), and the
+    reference-axis points a frame's data doesn't cover are left NaN
+    (via np.interp's left/right) rather than extrapolated - so the sum
+    at each reference-axis point is the sum over only the frames that
+    actually had a valid value there (np.nansum semantics), and a point
+    with no valid data in *any* frame stays NaN instead of becoming a
+    fabricated zero.
+
+    Parameters
+    ----------
+    spectra: list of array-like
+        One spectrum per frame.
+    frequencies: list of array-like
+        One frequency axis per frame, same length as `spectra`.
+
+    Returns
+    -------
+    summed_spectrum: np.ndarray
+        The elementwise sum, across frames, of every frame's spectrum
+        interpolated onto `reference_frequencies`.
+    reference_frequencies: np.ndarray
+        The common frequency axis (frequencies[0]) every frame was
+        interpolated onto.
+    """
+    reference_frequencies = np.asarray(frequencies[0], dtype=float)
+    interpolated = np.full(
+        (len(spectra), reference_frequencies.size), np.nan)
+    for frame_num, (spectrum, freq) in enumerate(zip(spectra, frequencies)):
+        freq = np.asarray(freq, dtype=float)
+        spectrum = np.asarray(spectrum, dtype=float)
+        mask = ~(np.isnan(freq) | np.isnan(spectrum))
+        freq = freq[mask]
+        spectrum = spectrum[mask]
+        if freq.size == 0:
+            continue
+        order = np.argsort(freq)
+        freq = freq[order]
+        spectrum = spectrum[order]
+        interpolated[frame_num] = np.interp(
+            reference_frequencies, freq, spectrum,
+            left=np.nan, right=np.nan)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            action='ignore', message='All-NaN axis encountered')
+        summed_spectrum = np.nansum(interpolated, axis=0)
+    # np.nansum silently returns 0 where every frame is NaN at that
+    # pixel - restore NaN there instead of a fabricated zero.
+    all_nan = np.all(np.isnan(interpolated), axis=0)
+    summed_spectrum[all_nan] = np.nan
+
+    return summed_spectrum, reference_frequencies
+
+
 class EvaluationController(ImageController):
 
     def __init__(self, *args, **kwargs):
@@ -576,6 +645,33 @@ class EvaluationController(ImageController):
                         'brillouin_peak_center_uncertainty'][ind] =\
                         results[frame_num][6]
 
+                if evm.evaluation_mode == 'sum':
+                    combined = self.fit_spectrum_combined(
+                        spectra, frequencies, region)
+                    ind_c = (ind_x, ind_y, ind_z,
+                             slice(None), region_key, 0)
+                    evm.results[
+                        'brillouin_peak_position_f_combined'][ind_c] =\
+                        combined[0]
+                    evm.results[
+                        'brillouin_peak_fwhm_f_combined'][ind_c] =\
+                        combined[1]
+                    evm.results[
+                        'brillouin_peak_intensity_combined'][ind_c] =\
+                        combined[2]
+                    evm.results[
+                        'brillouin_peak_offset_combined'][ind_c] =\
+                        combined[3]
+                    evm.results[
+                        'brillouin_peak_snr_combined'][ind_c] =\
+                        combined[4]
+                    evm.results[
+                        'brillouin_peak_nrmse_combined'][ind_c] =\
+                        combined[5]
+                    evm.results[
+                        'brillouin_peak_center_uncertainty_combined'][
+                        ind_c] = combined[6]
+
             for region_key, region in enumerate(rayleigh_regions,):
                 results = self.fit_spectra(spectra, frequencies, region)
                 for frame_num, _ in enumerate(spectra):
@@ -596,6 +692,33 @@ class EvaluationController(ImageController):
                         'rayleigh_peak_center_uncertainty'][ind] =\
                         results[frame_num][6]
 
+                if evm.evaluation_mode == 'sum':
+                    combined = self.fit_spectrum_combined(
+                        spectra, frequencies, region)
+                    ind_c = (ind_x, ind_y, ind_z,
+                             slice(None), region_key, 0)
+                    evm.results[
+                        'rayleigh_peak_position_f_combined'][ind_c] =\
+                        combined[0]
+                    evm.results[
+                        'rayleigh_peak_fwhm_f_combined'][ind_c] =\
+                        combined[1]
+                    evm.results[
+                        'rayleigh_peak_intensity_combined'][ind_c] =\
+                        combined[2]
+                    evm.results[
+                        'rayleigh_peak_offset_combined'][ind_c] =\
+                        combined[3]
+                    evm.results[
+                        'rayleigh_peak_snr_combined'][ind_c] =\
+                        combined[4]
+                    evm.results[
+                        'rayleigh_peak_nrmse_combined'][ind_c] =\
+                        combined[5]
+                    evm.results[
+                        'rayleigh_peak_center_uncertainty_combined'][
+                        ind_c] = combined[6]
+
             # We can only do a multi-peak fit after the single-peak
             # Rayleigh fit is done, because we have to know the
             # Rayleigh peak positions in GHz in order to convert
@@ -615,6 +738,31 @@ class EvaluationController(ImageController):
                     brillouin_regions,
                     rayleigh_peaks
                 )
+
+                # 'sum'-mode bounds are built from the combined
+                # (single-value, not per-frame) Rayleigh peak position -
+                # already populated above, since the Rayleigh single-
+                # peak fit block runs before this one. rayleigh_peaks_
+                # combined keeps the same (nr_rayleigh_regions, nr
+                # "times") shape create_bounds()/create_bounds_fwhm()
+                # expect, just with nr "times" == 1 (the combined fit is
+                # a single fit, not one per frame).
+                bounds_w0_combined = bounds_fwhm_combined = None
+                if evm.evaluation_mode == 'sum':
+                    ind_rc = (ind_x, ind_y, ind_z,
+                             slice(0, 1), slice(None), 0)
+                    rayleigh_peaks_combined = np.transpose(
+                        evm.results[
+                            'rayleigh_peak_position_f_combined'][ind_rc]
+                    )
+                    bounds_w0_combined = self.create_bounds(
+                        brillouin_regions,
+                        rayleigh_peaks_combined
+                    )
+                    bounds_fwhm_combined = self.create_bounds_fwhm(
+                        brillouin_regions,
+                        rayleigh_peaks_combined
+                    )
 
                 for region_key, region in enumerate(
                         brillouin_regions):
@@ -650,6 +798,39 @@ class EvaluationController(ImageController):
                         evm.results[
                             'brillouin_peak_center_uncertainty'][ind] = \
                             results_multi_peak[frame_num][6]
+
+                    if evm.evaluation_mode == 'sum':
+                        bw0 = bounds_w0_combined[region_key][0] \
+                            if bounds_w0_combined is not None else None
+                        bfwhm = bounds_fwhm_combined[region_key][0] \
+                            if bounds_fwhm_combined is not None else None
+                        combined_multi_peak = self.fit_spectrum_combined(
+                            spectra, frequencies, region,
+                            nr_brillouin_peaks, bw0, bfwhm)
+                        ind_c = (ind_x, ind_y, ind_z,
+                                 slice(None), region_key,
+                                 slice(1, nr_brillouin_peaks + 1))
+                        evm.results[
+                            'brillouin_peak_position_f_combined'][
+                            ind_c] = combined_multi_peak[0]
+                        evm.results[
+                            'brillouin_peak_fwhm_f_combined'][
+                            ind_c] = combined_multi_peak[1]
+                        evm.results[
+                            'brillouin_peak_intensity_combined'][
+                            ind_c] = combined_multi_peak[2]
+                        evm.results[
+                            'brillouin_peak_offset_combined'][
+                            ind_c] = combined_multi_peak[3]
+                        evm.results[
+                            'brillouin_peak_snr_combined'][
+                            ind_c] = combined_multi_peak[4]
+                        evm.results[
+                            'brillouin_peak_nrmse_combined'][
+                            ind_c] = combined_multi_peak[5]
+                        evm.results[
+                            'brillouin_peak_center_uncertainty_combined'][
+                            ind_c] = combined_multi_peak[6]
 
             # Calculate the shift of the Rayleigh peaks,
             # in order to follow the peaks in case of a drift
@@ -702,6 +883,35 @@ class EvaluationController(ImageController):
                 )
             fits.append(fit)
         return fits
+
+    @staticmethod
+    def fit_spectrum_combined(spectra, frequencies, region, nr_peaks=1,
+                              bounds_w0=None, bounds_fwhm=None):
+        """
+        The 'sum'-mode counterpart to fit_spectra() (see
+        EvaluationModel.evaluation_mode): combines every frame's
+        spectrum via _combine_spectra() and fits the resulting single
+        summed spectrum once with fit_lorentz_region(), instead of
+        fitting each frame separately and averaging the results.
+
+        Unlike fit_spectra(), `bounds_w0`/`bounds_fwhm` here are the
+        bounds for this one combined "frame" directly - not a
+        per-frame list to index by frame_num. The caller
+        (EvaluationController.evaluate()) builds them from the
+        combined Rayleigh peak position (a single value, not one per
+        frame) via create_bounds()/create_bounds_fwhm().
+
+        Returns
+        -------
+        tuple
+            The 7-tuple fit_lorentz_region() returns: w0, fwhm,
+            intensity, offset, snr, nrmse, center_uncertainty.
+        """
+        summed_spectrum, reference_frequencies = _combine_spectra(
+            spectra, frequencies)
+        return fit_lorentz_region(
+            region, reference_frequencies, summed_spectrum, nr_peaks,
+            bounds_w0, bounds_fwhm)
 
     def create_bounds(self, brillouin_regions, rayleigh_peaks):
         """
@@ -899,7 +1109,20 @@ class EvaluationController(ImageController):
                           r'$' + axis_label + '$ [$\\mu$m]', ['x', 'y', 'z']))
 
         evm = self.session.evaluation_model()
-        data = evm.results[parameter_key]
+        # 'sum' mode (see EvaluationModel.evaluation_mode): transparently
+        # redirect fit-derived keys to their single-sum-fit '_combined'
+        # backing array instead of the per-frame one - this one redirect
+        # is what makes QUALITY_METRIC_KEYS thresholds, the GUI plot and
+        # CSV export all pick up sum-mode values with no changes needed
+        # anywhere else, since they all go through get_data(). The
+        # original parameter_key is kept for everything else below (e.g.
+        # evm.parameters[parameter_key]['scaling']) - '_combined' keys
+        # are not registered in evm.parameters.
+        results_key = parameter_key
+        if evm.evaluation_mode == 'sum' \
+                and (parameter_key + '_combined') in evm.results:
+            results_key = parameter_key + '_combined'
+        data = evm.results[results_key]
 
         # Ensure that we always get the expected shape
         # (even if the array was not initialized yet)
@@ -919,10 +1142,15 @@ class EvaluationController(ImageController):
                     sliced = data[:, :, :, :, :, 1:]
                 # Weighted average of all multi-peak fits
                 if brillouin_peak_index == nr_peaks_stored + 1:
+                    intensity_key = 'brillouin_peak_intensity'
+                    fwhm_key = 'brillouin_peak_fwhm_f'
+                    if evm.evaluation_mode == 'sum':
+                        intensity_key += '_combined'
+                        fwhm_key += '_combined'
                     weight =\
                         evm.results[
-                            'brillouin_peak_intensity'][:, :, :, :, :, 1:]\
-                        * evm.results['brillouin_peak_fwhm_f'][
+                            intensity_key][:, :, :, :, :, 1:]\
+                        * evm.results[fwhm_key][
                           :, :, :, :, :, 1:]
                     # Nansum returns 0 if all entries are NaN, dividing by this
                     # hence gives an invalid value error
@@ -1156,6 +1384,50 @@ class EvaluationController(ImageController):
             return
         return evm.get_fits(*indices)
 
+    def get_fits_combined(self, image_key):
+        resolution = self.session.get_payload_resolution()
+        indices = self.get_indices_from_key(resolution, image_key)
+
+        evm = self.session.evaluation_model()
+        if not evm:
+            return
+        return evm.get_fits_combined(*indices)
+
+    def get_combined_spectrum(self, image_key):
+        """
+        Live preview of the 'sum'-mode combined spectrum (see
+        _combine_spectra()) for a single already-evaluated point,
+        regardless of the model's *current* evaluation_mode - lets a
+        viewer (e.g. BMicro's per-pixel spectrum dialog) show what the
+        combined spectrum trace would look like without having to
+        re-run evaluate() in 'sum' mode first. Uses the same cached
+        per-frame spectra and per-frame timestamps evaluate() itself
+        wrote (evm.get_spectra()/evm.results['time']), so the
+        combination is consistent with what a 'sum'-mode evaluation
+        would actually fit.
+
+        Returns
+        -------
+        (summed_spectrum, reference_frequencies) or (None, None) if
+        this point has no cached spectra/frequencies yet (e.g. never
+        evaluated).
+        """
+        evm = self.session.evaluation_model()
+        cm = self.session.calibration_model()
+        if not evm or not cm:
+            return None, None
+        spectra = evm.get_spectra(image_key)
+        if not spectra:
+            return None, None
+        resolution = self.session.get_payload_resolution()
+        ind_x, ind_y, ind_z = self.get_indices_from_key(
+            resolution, image_key)
+        times = evm.results['time'][ind_x, ind_y, ind_z, :, 0, 0]
+        frequencies = cm.get_frequencies_by_time(times)
+        if frequencies is None:
+            return None, None
+        return _combine_spectra(spectra, list(frequencies))
+
     @staticmethod
     def get_key_from_indices(resolution, ind_x, ind_y, ind_z):
         if len(resolution) != 3:
@@ -1182,6 +1454,36 @@ class EvaluationController(ImageController):
                 or ind_z >= resolution[2]:
             raise ValueError('Invalid key')
         return ind_x, ind_y, ind_z
+
+
+def _get_fsr(cm):
+    """
+    A robust single estimate (Hz) of the VIPA etalon's free spectral
+    range - a fixed physical property of the etalon (thickness,
+    refractive index, angle - see bmlab.models.setup.Setup), not
+    expected to drift between measurement frames the way a per-frame
+    Rayleigh peak fit can. Computed as the median of the 4th parameter
+    fitted by fits.fit_vipa() (`fsr` in its `error()` closure) across
+    every calibration frame this repetition has - i.e. from the clean,
+    high-SNR calibration sample fits, not from the (often much weaker)
+    Rayleigh peaks of the actual measurement.
+
+    Parameters
+    ----------
+    cm: CalibrationModel
+
+    Returns
+    -------
+    float or None
+        The estimated FSR in Hz, or None if no calibration has been
+        fitted yet.
+    """
+    fsrs = [abs(params[3])
+            for frame_params in cm.vipa_params.values()
+            for params in frame_params]
+    if not fsrs:
+        return None
+    return np.median(fsrs)
 
 
 def calculate_derived_values():
@@ -1223,6 +1525,75 @@ def calculate_derived_values():
             message='All-NaN slice encountered'
         )
         evm.results['brillouin_shift_f'] = np.nanmin(brillouin_shift_f, 6)
+
+    # Stokes/Anti-Stokes-distance shift - only defined when exactly 2
+    # Brillouin regions are selected (the Stokes/Anti-Stokes layout this
+    # method assumes). Only the primary (peak-index 0) fit is used;
+    # multi-component sub-peak slots (index >= 1) are left NaN.
+    #
+    # A VIPA spectrum is periodic with period FSR, so within one order
+    # (Rayleigh, Stokes, Anti-Stokes, Rayleigh) the Anti-Stokes peak sits
+    # near the *next* Rayleigh order, not mirrored directly around the
+    # same Rayleigh peak as Stokes: distance(Anti-Stokes, Stokes) =
+    # FSR - 2 * shift, NOT 2 * shift. FSR comes from the calibration fit
+    # (_get_fsr()), not from this frame's own (often much weaker,
+    # biological-sample) Rayleigh peaks - that's what keeps this method
+    # useful even when the Rayleigh fit itself is unreliable.
+    evm.results['brillouin_shift_f_stokes_anti_stokes'][:] = np.nan
+    cm = session.calibration_model()
+    fsr = _get_fsr(cm) if cm else None
+    if shape_brillouin[4] == 2 and fsr is not None:
+        positions = evm.results['brillouin_peak_position_f'][..., 0]
+        with warnings.catch_warnings():
+            warnings.filterwarnings(action='ignore', category=RuntimeWarning)
+            distance = (np.nanmax(positions, axis=4)
+                        - np.nanmin(positions, axis=4))
+        shift_sa = (fsr - distance) / 2
+        evm.results['brillouin_shift_f_stokes_anti_stokes'][..., 0] = \
+            np.repeat(shift_sa[..., np.newaxis], 2, axis=4)
+
+    # @since 0.14.0 - 'sum'-mode combined-fit derived values (see
+    # EvaluationModel.evaluation_mode). Same two computations as above,
+    # sourced from the single sum-fit's peak positions
+    # (*_position_f_combined) instead of the per-frame ones. This runs
+    # unconditionally, regardless of evaluation_mode - a harmless no-op
+    # (all-NaN result) in 'single' mode, since the _combined position
+    # arrays stay NaN then.
+    if 'brillouin_peak_position_f_combined' in evm.results \
+            and 'rayleigh_peak_position_f_combined' in evm.results:
+        brillouin_shift_f_combined = np.nan * np.ones(
+            (*shape_brillouin, shape_rayleigh[4]))
+        for idx in range(shape_rayleigh[4]):
+            brillouin_shift_f_combined[:, :, :, :, :, :, idx] = abs(
+                evm.results['brillouin_peak_position_f_combined'] -
+                np.tile(
+                    evm.results['rayleigh_peak_position_f_combined'][
+                        :, :, :, :, [idx], :],
+                    (1, 1, 1, 1, 1, shape_brillouin[5])
+                )
+            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                action='ignore', message='All-NaN slice encountered')
+            evm.results['brillouin_shift_f_combined'] = np.nanmin(
+                brillouin_shift_f_combined, 6)
+
+        evm.results['brillouin_shift_f_stokes_anti_stokes_combined'][:] = \
+            np.nan
+        if shape_brillouin[4] == 2 and fsr is not None:
+            positions_combined = evm.results[
+                'brillouin_peak_position_f_combined'][..., 0]
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    action='ignore', category=RuntimeWarning)
+                distance_combined = (
+                    np.nanmax(positions_combined, axis=4)
+                    - np.nanmin(positions_combined, axis=4))
+            shift_sa_combined = (fsr - distance_combined) / 2
+            evm.results[
+                'brillouin_shift_f_stokes_anti_stokes_combined'][..., 0] = \
+                np.repeat(shift_sa_combined[..., np.newaxis], 2, axis=4)
 
     # Quality metrics (see EvaluationModel.get_default_parameters() for
     # what each one means) - all NaN-safe, since a point can easily
@@ -1450,6 +1821,28 @@ class BackgroundController(ImageController):
             )
             bgm.results['brillouin_shift_f'] = np.nanmin(
                 brillouin_shift_f, 3)
+
+        # Stokes/Anti-Stokes-distance shift - see controllers.
+        # calculate_derived_values() for the main payload grid (including
+        # why the FSR correction below is needed); same formula, only
+        # defined for exactly 2 Brillouin regions, applied here to the
+        # flat background-point shape (no peak-index axis).
+        bgm.results['brillouin_shift_f_stokes_anti_stokes'][:] = np.nan
+        cm = session.calibration_model()
+        fsr = _get_fsr(cm) if cm else None
+        if shape_brillouin[2] == 2 and fsr is not None:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    action='ignore', category=RuntimeWarning)
+                distance = (
+                    np.nanmax(
+                        bgm.results['brillouin_peak_position_f'], axis=2)
+                    - np.nanmin(
+                        bgm.results['brillouin_peak_position_f'], axis=2)
+                )
+            shift_sa = (fsr - distance) / 2
+            bgm.results['brillouin_shift_f_stokes_anti_stokes'] = np.repeat(
+                shift_sa[:, :, np.newaxis], 2, axis=2)
 
     def get_data(self, parameter_key):
         """

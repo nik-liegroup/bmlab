@@ -316,7 +316,26 @@ class MeasurementData(object):
         imgs = self.data.get(image_key)
         if imgs is None:
             return None
-        return np.array(imgs)
+        # Newer BrillouinAcquisition files may pad a point's frame stack
+        # with unused trailing slots (adaptive frame extension: the frame
+        # axis is sized for camera.frameCount + maxAdditionalFrames for
+        # every point, regardless of how many frames were actually taken
+        # at this point). The `frames_actual` attribute, when present,
+        # records how many leading frames along that axis are real; we
+        # trim the padded/ragged trailing slots here, before any caller
+        # (e.g. ImageController.extract_spectra) ever sees the array, so
+        # downstream frame counts (len(imgs), np.arange(len(imgs)), ...)
+        # reflect only the real frames. Older files, or files where the
+        # feature wasn't used, have no such attribute and are returned
+        # unchanged.
+        try:
+            frames_actual = int(imgs.attrs.get('frames_actual')[0])
+        except Exception:
+            frames_actual = None
+        array = np.array(imgs)
+        if frames_actual is not None and 0 <= frames_actual < array.shape[0]:
+            array = array[:frames_actual]
+        return array
 
     def get_image_count(self, image_key):
         if self.data is None:
@@ -324,6 +343,12 @@ class MeasurementData(object):
         imgs = self.data.get(image_key)
         if imgs is None:
             return 0
+        try:
+            frames_actual = int(imgs.attrs.get('frames_actual')[0])
+        except Exception:
+            frames_actual = None
+        if frames_actual is not None and 0 <= frames_actual < imgs.shape[0]:
+            return frames_actual
         return imgs.shape[0]
 
     def get_date(self, image_key):

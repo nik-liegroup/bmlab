@@ -49,6 +49,11 @@ class BackgroundModel(Serializer):
             self.positions = {}
         if not hasattr(self, 'stage_positions'):
             self.stage_positions = {}
+        # Migrations from 0.13.0 to 0.14.0
+        # @since 0.14.0
+        if 'brillouin_shift_f_stokes_anti_stokes' not in self.results:
+            self.results['brillouin_shift_f_stokes_anti_stokes'] = np.full(
+                self.results['brillouin_peak_position_f'].shape, np.nan)
 
     @staticmethod
     def get_default_parameters():
@@ -57,6 +62,15 @@ class BackgroundModel(Serializer):
                 'unit': 'GHz',
                 'symbol': r'$\nu_\mathrm{B}$',
                 'label': 'Brillouin frequency shift',
+                'scaling': 1e-9,
+            },
+            'brillouin_shift_f_stokes_anti_stokes': {
+                # [GHz] See EvaluationModel.get_default_parameters() -
+                # same Stokes/Anti-Stokes-distance derived shift, computed
+                # for the background/reference points.
+                'unit': 'GHz',
+                'symbol': r'$\nu_\mathrm{B,SA}$',
+                'label': 'Brillouin frequency shift (Stokes-Anti-Stokes)',
                 'scaling': 1e-9,
             },
             'brillouin_peak_fwhm_f': {
@@ -178,7 +192,8 @@ class BackgroundModel(Serializer):
         for key in (
                 'brillouin_peak_position_f', 'brillouin_peak_fwhm_f',
                 'brillouin_peak_intensity', 'brillouin_peak_offset',
-                'brillouin_shift_f', 'brillouin_peak_snr',
+                'brillouin_shift_f', 'brillouin_shift_f_stokes_anti_stokes',
+                'brillouin_peak_snr',
                 'brillouin_peak_nrmse',
                 'brillouin_peak_center_uncertainty'):
             self.results[key] = np.full(shape_brillouin, np.nan)
