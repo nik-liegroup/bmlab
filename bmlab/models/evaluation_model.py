@@ -178,6 +178,16 @@ class EvaluationModel(Serializer):
                 self.results[combined_key] = np.full(
                     self.results[key].shape, np.nan)
 
+        # Migration for the double-peak quality check.
+        # Results saved before the double-peak check existed were never
+        # checked for one: count every fitted point as "no double peak"
+        # rather than leaving NaN, which a threshold would treat as a
+        # failure for the whole file. Re-evaluating fills in real values.
+        if 'brillouin_double_peak' not in self.results:
+            fitted = np.isfinite(self.results['brillouin_peak_position_f'])
+            self.results['brillouin_double_peak'] = np.where(
+                fitted, 0.0, np.nan)
+
     def invalidate_results(self):
         for key in self.parameters:
             self.results[key][:] = np.nan
@@ -307,6 +317,20 @@ class EvaluationModel(Serializer):
                 'label': 'Brillouin peak center uncertainty (quality)',
                 'scaling': 1e-9,
             },
+            'brillouin_double_peak': {
+                # [-] 1 = the spectrum shows two clearly separate peaks
+                # in the Brillouin region (see bmlab.double_peak), 0 = it
+                # doesn't. Averaged over frames and regions like every
+                # other parameter, so any value above 0 means a double
+                # peak was found somewhere at this point. A single
+                # Lorentzian fitted to such a spectrum lands between or
+                # on one of the peaks, and neither is a meaningful
+                # Brillouin shift - fit SNR and NRMSE can still look fine.
+                'unit': '',
+                'symbol': r'$\mathrm{DP}_\mathrm{B}$',
+                'label': 'Brillouin double peak detected (quality)',
+                'scaling': 1,
+            },
             'rayleigh_peak_snr': {
                 # [a.u.] Same as brillouin_peak_snr, for the Rayleigh
                 # fit - the Brillouin shift is computed relative to the
@@ -405,6 +429,10 @@ class EvaluationModel(Serializer):
                 'enabled': True, 'min': None, 'max': 0.08},
             'rayleigh_peak_center_uncertainty': {
                 'enabled': True, 'min': None, 'max': 0.08},
+            # Any clearly detected double peak invalidates the point
+            # (the value is the fraction of frames/regions showing one).
+            'brillouin_double_peak': {
+                'enabled': True, 'min': None, 'max': 0.0},
         }
 
     def initialize_results_arrays(self, dims):
@@ -471,6 +499,9 @@ class EvaluationModel(Serializer):
         self.results['brillouin_peak_center_uncertainty'] = np.empty(
             shape_brillouin)
         self.results['brillouin_peak_center_uncertainty'][:] = np.nan
+
+        self.results['brillouin_double_peak'] = np.empty(shape_brillouin)
+        self.results['brillouin_double_peak'][:] = np.nan
 
         # Derived (not fit-direct) quality diagnostic - only
         # controllers.calculate_derived_values() actually computes

@@ -110,6 +110,10 @@ class BrillouinFile(object):
         """
         self.path = Path(path).resolve()
         self.file = None
+        # Repetitions are built once per file; building one reads its
+        # positions and reconstructs the surface-follow z values, which
+        # is far too slow to repeat on every access.
+        self._repetition_cache = {}
         self.file = h5py.File(self.path, 'r')
         self.file_version_string = self.file.attrs.get('version')[
             0].decode('utf-8')
@@ -217,10 +221,15 @@ class BrillouinFile(object):
         # Check that we have a group for this mode
         if mode_group is None:
             return None
-        if version.parse(self.file_version) >= version.parse("0.0.4"):
-            return Repetition(mode_group.get(repetition_key), self)
-        else:
-            return Repetition(self.file, self)
+        cache_key = (mode, repetition_key)
+        repetition = self._repetition_cache.get(cache_key)
+        if repetition is None:
+            if version.parse(self.file_version) >= version.parse("0.0.4"):
+                repetition = Repetition(mode_group.get(repetition_key), self)
+            else:
+                repetition = Repetition(self.file, self)
+            self._repetition_cache[cache_key] = repetition
+        return repetition
 
 
 class Repetition(object):

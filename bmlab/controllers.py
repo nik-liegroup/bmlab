@@ -9,6 +9,7 @@ from math import floor
 
 from bmlab import Session
 from bmlab.fits import fit_vipa, VIPA, fit_lorentz_region
+from bmlab.double_peak import has_double_peak
 from bmlab.image import extract_lines_along_arc, find_max_in_radius
 from bmlab.export import FluorescenceExport, \
     FluorescenceCombinedExport, BrillouinExport, \
@@ -644,6 +645,12 @@ class EvaluationController(ImageController):
                     evm.results[
                         'brillouin_peak_center_uncertainty'][ind] =\
                         results[frame_num][6]
+                    # Same value for every stored peak index
+                    evm.results['brillouin_double_peak'][
+                        ind_x, ind_y, ind_z, frame_num, region_key, :] =\
+                        has_double_peak(
+                            region, frequencies[frame_num],
+                            spectra[frame_num])
 
                 if evm.evaluation_mode == 'sum':
                     combined = self.fit_spectrum_combined(
@@ -1202,6 +1209,7 @@ class EvaluationController(ImageController):
         'brillouin_peak_nrmse',
         'rayleigh_peak_nrmse',
         'brillouin_peak_fwhm_f',
+        'brillouin_double_peak',
     ]
 
     # Sentinel default for set_quality_threshold()'s keyword arguments,
