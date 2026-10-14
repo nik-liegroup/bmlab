@@ -1,5 +1,78 @@
-## 0.14.0 - Unreleased
+## 0.14.0
+### Fixed
+- fix(export): an overview stopped part-way (fewer tiles in its last planes)
+  failed to export ("all input arrays must have the same shape"); all planes
+  of a tiled overview now share one canvas.
+- fix(export): brightfield images are placed by the middle of the image, not
+  by the laser target. A target puts the laser on a point, and the laser sits
+  where its marker was set in the camera image (13 - 57 um from the middle in
+  these files); only the overview engine moved its targets by that shift.
+  - The images taken in the Fluorescence tab (`FL_BMrep<N>`, also the
+    combined ones) were 0.15 - 0.25 mm, with relative grid coordinates several
+    mm, away from the overviews: BrillouinAcquisition
+    stores their position in the grid frame in force when they were taken,
+    before Start. They are now placed from `stage_position_raw` minus the
+    image centre shift (`Payload.get_image_centre_raw()`), in the frame of
+    the Brillouin repetition they are filed under
+    (`Payload.raw_to_grid_frame()`: minus the absolute origin of the grid, or
+    the raw position with relative coordinates).
+  - Overview images from before the engine and per-point images are placed
+    by their target minus the shift (`Payload.get_image_centre_shift()`).
+  - `tools/add_image_centres.py` writes `image_centre_shift`,
+    `fov_compensation` and (images taken by hand) `stage_position_raw` into
+    files from before BrillouinAcquisition wrote them, from the scale
+    calibration of each image's repetition and its camera ROI. Checked: FL images and overviews of old files register
+    within 3 - 5 um, engine files 4 - 12 um.
+### Removed
+- Legacy code, after the files were converted: `tools/migrate_legacy_overviews.py`
+  rewrites the attributes of the overview images of files from before the
+  overview engine (channel, event, tile and stack index, repetition, position;
+  no spectrum or image is touched), so the
+  overview export has one reader: the old path that guessed events, tiles and
+  repetition from the order and positions of the images
+  (`Payload.has_overview_brightfield()`, `get_overview_brightfield_positions()`
+  and their `Session` counterparts, `positions-overview-brightfield-*`) is
+  gone. Images of the overview channels without the attributes are reported
+  and not exported.
+- Support of H5BM files before v0.0.4 (they raise `BadFileException`).
 ### Added
+- feat(file): overview engine of BrillouinAcquisition (channel
+  `Brightfield overview`): `OVERVIEW_EVENT_CHANNEL`,
+  `OVERVIEW_CHANNELS`, `MeasurementData.get_overview_info()` (event, kind,
+  tile and stack index, the image's own scale calibration, drift offset,
+  FOV compensation and image centre shift, and the `anchor`: the CSV
+  position in the middle of the image - the target the engine stores is
+  not it), `Payload.get_overview_events()` (per event: objectives, drift
+  decision, step, total, grid offset after, correlation),
+  `get_overview_objectives()`, `get_surface_rescans()`,
+  `get_resume_events()` and `Repetition.acquisition_state`.
+- feat(export): the overview engine's images are exported like the z
+  overviews, `Plots/Overview_BMrep<N>/overview_<n>_<time>.tif` (one file per
+  event and objective, a z stack as multi-page TIFF) with a transform matrix
+  per file that maps the CSV x, y onto its pixels - from the image's own
+  calibration (the repetition's is that of the measuring objective: the
+  `BrightfieldOverview_*` files exported through the Fluorescence export
+  before had the wrong scale and a position off by the image centre shift)
+  and the anchor - and an `overview_events.csv` per folder with what each
+  file is. They are no longer also exported as
+  `FL_BMrep<N>/BrightfieldOverview_*`.
+- feat(export): drift correction while measuring. `Payload.get_runtime_drift()`,
+  `get_point_drift_offsets()` (the offset every point was measured with,
+  laid out like the grid) and `get_scan_plan()` (the order the points were
+  measured in). The Brillouin CSV header gets `#drift_runtime_applied`,
+  `..._applied_events`, `..._evaluated_events`, `..._max_offset_um`,
+  `..._decisions`, `#acquisition_state` and the new overview/drift settings.
+  `Export/*_BMrep<N>_runtime_drift.csv` has one line per drift step
+  (decision, step, total, grid offset after, correlation, tiles compared and
+  used, seconds since the reference, ...); the data CSV keeps the planned
+  positions, which are the positions on the sample for every applied step.
+  There is no second copy of the data with the points moved.
+- feat(export): the grid definition in the CSV header (`#grid_<axis>_steps`,
+  `_min_um`, `_max_um`, `_step_um`, `#grid_absolute_origin_<axis>_um`,
+  `#grid_scan_loop_level_<axis>`, `#grid_coordinates_absolute`, the ROI
+  polygons) from `Payload.get_grid_definition()`.
+- `Session.get_overview_brightfield_keys()` also returns the images of the
+  overview engine.
 - feat(evaluation): second Brillouin shift quantity,
   `brillouin_shift_f_stokes_anti_stokes`, computed from the distance
   between the Stokes and Anti-Stokes Brillouin peaks instead of relative

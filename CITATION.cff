@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "bmlab"
+abstract: >-
+  Library for reading, evaluating and exporting Brillouin microscopy data; this version adds support for the
+  overview engine of BrillouinAcquisition, the drift correction applied while measuring and the export of the
+  overview images.
+authors:
+  - family-names: Gampl
+    given-names: Niklas
+  - name: "bmlab developers"
+version: 0.14.0
+license: GPL-3.0-only
+repository-code: "https://github.com/nik-liegroup/bmlab"
+keywords:
+  - Brillouin microscopy
+  - data evaluation
+references:
+  - type: software
+    title: "bmlab"
+    authors:
+      - name: "bmlab developers"
+    repository-code: "https://github.com/BrillouinMicroscopy/bmlab"
+    license: GPL-3.0-only

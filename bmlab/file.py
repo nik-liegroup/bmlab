@@ -8,6 +8,7 @@ do not expose HDF objects to the outside (like BMicro).
 """
 
 import datetime
+import re
 
 import numpy as np
 import h5py
@@ -18,29 +19,54 @@ from packaging import version
 BRILLOUIN_GROUP = 'Brillouin'
 FLUORESCENCE_GROUP = 'Fluorescence'
 
-# Channel name BrillouinAcquisition uses for brightfield overview
-# images recorded during a surface-following measurement. These are
-# stored as regular Fluorescence-mode images, distinguished only by
-# this channel attribute (no dedicated HDF5 group exists for them).
+# Channel name of the overview of the measuring objective that is taken
+# after every z plane. Like the other overviews it is stored as a regular
+# Fluorescence-mode image, distinguished only by this channel attribute
+# (no dedicated HDF5 group exists for them), and carries the same
+# attributes (see OVERVIEW_EVENT_CHANNEL).
 OVERVIEW_BRIGHTFIELD_CHANNEL = 'Brightfield z overview'
+
+# Channel name of the other brightfield overviews of the overview engine
+# (files of older BrillouinAcquisition versions are converted to it by
+# tools/migrate_legacy_overviews.py): one "event" is taken before
+# the measurement, after every z plane and/or after the measurement,
+# with one or several objectives; every image carries its own metadata
+# (overview_event, overview_kind_name, overview_tile_index,
+# overview_stack_index, grid_offset_x_um, image_centre_shift_x_um, ...)
+# and its own scale calibration, see MeasurementData.get_overview_info().
+OVERVIEW_EVENT_CHANNEL = 'Brightfield overview'
+
+# All overview images; everything that treats "the overviews" (export,
+# exclusion from the plain Fluorescence export) uses this.
+OVERVIEW_CHANNELS = (OVERVIEW_BRIGHTFIELD_CHANNEL, OVERVIEW_EVENT_CHANNEL)
 
 # Channel name for a plain single-shot brightfield snapshot, as taken
 # e.g. right before a scan starts (its own single-image Fluorescence
-# repetition, not the OVERVIEW_BRIGHTFIELD_CHANNEL z-stack/tile
-# capture) - handled the same way by OverviewBrightfieldExport so
-# these "before" images get a .tif and transform matrix too, not just
-# "during"/"after" ones.
+# repetition, not an overview event) - exported by FluorescenceExport
+# with a .tif and transform matrix like the other snapshots.
 BRIGHTFIELD_CHANNEL = 'Brightfield'
 
 # Channel name for a brightfield image captured alongside an
 # individual Brillouin measurement point (one per point, or one per
 # every Nth point - see Brillouin::capturePerPointBrightfieldImage()),
-# as opposed to OVERVIEW_BRIGHTFIELD_CHANNEL's per-z-plane overview
-# capture. Both its position and stage-position attributes are
+# as opposed to the per-z-plane overviews (OVERVIEW_CHANNELS). Both its position and stage-position attributes are
 # already converted into the same grid frame as the Brillouin
 # measurement grid's own positions-x/y/z, exactly like the overview
 # channels above.
 PER_POINT_BRIGHTFIELD_CHANNEL = 'Brightfield per-point'
+
+
+def _get_text_attribute(group, name):
+    """A text attribute as written by BrillouinAcquisition (a one-element
+    array of bytes) as str, None if it is missing."""
+    try:
+        value = group.attrs.get(name)
+        if value is None:
+            return None
+        value = np.ravel(value)[0]
+        return value.decode('utf-8') if hasattr(value, 'decode')             else str(value)
+    except BaseException:
+        return None
 
 
 def _get_datetime(time_stamp):
@@ -110,30 +136,27 @@ class BrillouinFile(object):
         """
         self.path = Path(path).resolve()
         self.file = None
+        # Repetitions are built once per file; building one reads its
+        # positions and reconstructs the surface-follow z values, which
+        # is far too slow to repeat on every access.
+        self._repetition_cache = {}
         self.file = h5py.File(self.path, 'r')
         self.file_version_string = self.file.attrs.get('version')[
             0].decode('utf-8')
         if not self.file_version_string.startswith('H5BM'):
             raise BadFileException('File does not contain any Brillouin data')
         self.file_version = self.file_version_string[-5:]
+        if version.parse(self.file_version) < version.parse("0.0.4"):
+            raise BadFileException(
+                'File format %s is not supported (H5BM-v0.0.4 or newer '
+                'is)' % self.file_version_string)
+        if BRILLOUIN_GROUP not in self.file:
+            raise BadFileException('File does not contain any Brillouin data')
+        self.Brillouin_group = self.file[BRILLOUIN_GROUP]
         # Fluorescence group is optional
         self.Fluorescence_group = None
-
-        if version.parse(self.file_version) >= version.parse("0.0.4"):
-            """"
-            New Brillouin file format,
-            supporting different modes and repetitions
-            """
-            if BRILLOUIN_GROUP not in self.file:
-                raise BadFileException(
-                    'File does not contain any Brillouin data')
-            self.Brillouin_group = self.file[BRILLOUIN_GROUP]
-
-            if FLUORESCENCE_GROUP in self.file:
-                self.Fluorescence_group = self.file[FLUORESCENCE_GROUP]
-        else:
-            """ Old Brillouin file format """
-            self.Brillouin_group = self.file
+        if FLUORESCENCE_GROUP in self.file:
+            self.Fluorescence_group = self.file[FLUORESCENCE_GROUP]
         # Comments are optional,
         # e.g. for files containing only fluorescence data
         comment = self.file.attrs.get('comment')
@@ -187,12 +210,7 @@ class BrillouinFile(object):
             mode_group = self.Fluorescence_group
         if mode_group is None:
             return []
-        if version.parse(self.file_version) >= version.parse("0.0.4"):
-            return list(mode_group.keys())
-        elif mode == BRILLOUIN_GROUP:
-            return list(['0'])
-        else:
-            return []
+        return list(mode_group.keys())
 
     def get_repetition(self, repetition_key, mode=BRILLOUIN_GROUP):
         """
@@ -217,10 +235,12 @@ class BrillouinFile(object):
         # Check that we have a group for this mode
         if mode_group is None:
             return None
-        if version.parse(self.file_version) >= version.parse("0.0.4"):
-            return Repetition(mode_group.get(repetition_key), self)
-        else:
-            return Repetition(self.file, self)
+        cache_key = (mode, repetition_key)
+        repetition = self._repetition_cache.get(cache_key)
+        if repetition is None:
+            repetition = Repetition(mode_group.get(repetition_key), self)
+            self._repetition_cache[cache_key] = repetition
+        return repetition
 
 
 class Repetition(object):
@@ -237,6 +257,14 @@ class Repetition(object):
         """
         self.date = _get_datetime(
             repetition_group.attrs.get('date')[0].decode('utf-8'))
+        # How the repetition ended, as written by BrillouinAcquisition
+        # versions with Continue/resume: 'preparing', 'surface-scan',
+        # 'surface-scan-stopped', 'measuring', 'stopped' or 'finished'.
+        # None for files that predate it.
+        self.acquisition_state = _get_text_attribute(
+            repetition_group, 'acquisition_state')
+        self.acquisition_state_time = _get_text_attribute(
+            repetition_group, 'acquisition_state_time')
         self.payload = Payload(repetition_group.get('payload'), self)
         calibration_group = repetition_group.get('calibration')
         # Having a calibration is optional for a repetition
@@ -385,7 +413,7 @@ class MeasurementData(object):
             return self.data.get(image_key).attrs\
                 .get('exposure')[0]
         except Exception:
-            # For older files we return a default value
+            # the test fixtures of the first file format version have none
             return 0.5
 
     def get_binning(self, image_key):
@@ -397,7 +425,7 @@ class MeasurementData(object):
             return self.data.get(image_key).attrs\
                 .get('binning')[0].decode('utf-8')
         except Exception:
-            # For older files we return a default value
+            # the test fixtures of the first file format version have none
             return '1x1'
 
     def get_binning_factor(self, image_key):
@@ -544,6 +572,148 @@ class MeasurementData(object):
             }
         except BaseException:
             return None
+
+    # The kinds of overview moments (OVERVIEW_MOMENT_KIND in
+    # BrillouinAcquisition); the number is stored as 'overview_kind'.
+    OVERVIEW_KIND_NAMES = {
+        0: 'before measurement', 1: 'after z plane',
+        2: 'after repetition', 3: 'after measurement'}
+
+    def _attribute(self, image_key, name):
+        """One attribute of an image as float or str; None if missing."""
+        try:
+            value = self.data.get(image_key).attrs.get(name)
+            if value is None:
+                return None
+            value = np.ravel(value)[0]
+            if isinstance(value, (bytes, np.bytes_)):
+                return value.decode('utf-8')
+            return float(value)
+        except BaseException:
+            return None
+
+    def _attribute_pair(self, image_key, name_x, name_y, default=None):
+        x = self._attribute(image_key, name_x)
+        y = self._attribute(image_key, name_y)
+        if x is None or y is None:
+            return default
+        return (x, y)
+
+    def get_overview_info(self, image_key):
+        """
+        Returns what the overview engine of BrillouinAcquisition wrote
+        with an image of the OVERVIEW_EVENT_CHANNEL, or None if the image
+        has none of it (any other channel, older files).
+
+        Returns
+        -------
+        out: dict
+            'event': number of the overview event (one event = one round
+                of overviews, with one or several objectives),
+            'kind', 'kind_name': before measurement / after z plane /
+                after repetition / after measurement,
+            'z_index', 'point_index' (-1 before the first point),
+            'objective_slot', 'objective_name', 'magnification',
+            'is_measurement_objective', 'tile_index', 'tile_count',
+            'stack_index', 'stack_count', 'is_centre_slice',
+            'seconds_since_start', 'repetition' (key of the Brillouin
+            repetition it was taken during),
+            'position', 'stage_position': dicts with x, y, z in um in the
+                frame of the Brillouin positions-x/y/z (the target of the
+                LASER, shifts below included),
+            'grid_offset': (x, y), the drift offset the grid had been
+                moved by when the image was taken (0 without drift
+                correction), 'fov_compensation' and
+                'image_centre_shift': (x, y), see below,
+            'scale_calibration': the scale calibration of the objective
+                that took the image (the keys needed to place it),
+            'anchor': dict with x, y, z: the CSV coordinate (planned grid
+                position, drift offset taken off) of the middle of the
+                image.
+
+        The stored target is not the middle of the image: the overview
+        engine puts the centre of gravity of the grid points there and
+        moves the target by the scanner offset, the position of the
+        image centre against the calibration origin (image_centre_shift)
+        and the FOV offset of the objective against the measuring one
+        (fov_compensation), and the drift offset is added to every stage
+        target. The anchor takes all of that off again (checked against
+        the centre of gravity of the measured points: within 0.1 um).
+        """
+        event = self._attribute(image_key, 'overview_event')
+        if event is None:
+            return None
+
+        def number(name, default=None):
+            value = self._attribute(image_key, name)
+            return default if value is None else value
+
+        position = self.get_position(image_key)
+        stage_position = self.get_stage_position(image_key)
+        grid_offset = self._attribute_pair(
+            image_key, 'grid_offset_x_um', 'grid_offset_y_um', (0.0, 0.0))
+        fov = self._attribute_pair(
+            image_key, 'fov_compensation_x_um', 'fov_compensation_y_um',
+            (0.0, 0.0))
+        shift = self._attribute_pair(
+            image_key, 'image_centre_shift_x_um', 'image_centre_shift_y_um',
+            (0.0, 0.0))
+        # where the lens was: the read-back position if there is one
+        measured = stage_position or position
+        anchor = None
+        if measured is not None:
+            anchor = {
+                'x': measured['x'] - shift[0] - fov[0] - grid_offset[0],
+                'y': measured['y'] - shift[1] - fov[1] - grid_offset[1],
+                # (the plane it was aimed at: stable for grouping the
+                # pages of a mosaic, unlike the read-back)
+                'z': (position or measured)['z']}
+
+        scale = None
+        x_pair = self._attribute_pair(
+            image_key, 'scale_micrometer_to_pix_x_col',
+            'scale_micrometer_to_pix_x_row')
+        y_pair = self._attribute_pair(
+            image_key, 'scale_micrometer_to_pix_y_col',
+            'scale_micrometer_to_pix_y_row')
+        if x_pair is not None and y_pair is not None:
+            scale = {
+                'micrometerToPixX': x_pair,
+                'micrometerToPixY': y_pair,
+                'origin': self._attribute_pair(
+                    image_key, 'scale_origin_col', 'scale_origin_row'),
+                'objectiveName': self._attribute(image_key, 'objective_name'),
+                'magnification': number('objective_magnification')}
+
+        kind = number('overview_kind')
+        kind = None if kind is None else int(kind)
+        return {
+            'event': int(event),
+            'kind': kind,
+            'kind_name': self._attribute(image_key, 'overview_kind_name')
+            or self.OVERVIEW_KIND_NAMES.get(kind),
+            'z_index': int(number('overview_z_index', 0)),
+            'point_index': int(number('overview_point_index', -1)),
+            'objective_slot': int(number('overview_objective_slot', -1)),
+            'objective_name': self._attribute(image_key, 'objective_name'),
+            'magnification': number('objective_magnification'),
+            'is_measurement_objective': bool(
+                number('overview_is_measurement_objective', 0)),
+            'tile_index': int(number('overview_tile_index', 0)),
+            'tile_count': int(number('overview_tile_count', 1)),
+            'stack_index': int(number('overview_stack_index', 0)),
+            'stack_count': int(number('overview_stack_count', 1)),
+            'is_centre_slice': bool(number('overview_is_centre_slice', 0)),
+            'seconds_since_start': number('overview_seconds_since_start'),
+            'repetition': self.get_brillouin_repetition_index(image_key),
+            'position': position,
+            'stage_position': stage_position,
+            'grid_offset': grid_offset,
+            'fov_compensation': fov,
+            'image_centre_shift': shift,
+            'scale_calibration': scale,
+            'anchor': anchor,
+        }
 
 
 class Payload(MeasurementData):
@@ -827,6 +997,66 @@ class Payload(MeasurementData):
             data[key] = np.array(ds).flatten()[0] if ds is not None else None
         return data
 
+    def get_surface_follow_summary(self):
+        """
+        Returns the surface-follow settings of this repetition and how
+        well the surface was found, as scalars (what the combined CSV
+        export writes into its header), or None if this payload has no
+        surface-scan data.
+
+        Returns
+        -------
+        out: dict or None
+            The scalar settings of SURFACE_SCAN_SETTINGS (each None if
+            the file predates it), plus
+            'surface_planned_columns': columns inside the planned ROI,
+            'surface_planned_columns_with_surface': of those, the ones
+                that have a surface z (found by measurement or filled
+                in, mask value 1 or 2) - the others have none,
+            and, only if the file carries the coarse pre-scan:
+            'surface_prescan_columns_in_roi': pre-scan columns whose
+                nearest grid column lies in the planned ROI,
+            'surface_prescan_found': of those, found by measurement
+                (mask value 1),
+            'surface_prescan_filled_in': filled in (value 2),
+            'surface_prescan_not_found': not found (value 0).
+            The surface is only measured on the coarse pre-scan
+            columns; the dense grid's other columns get their surface
+            z by interpolation, so the dense mask alone says little
+            about how many columns found a surface.
+        """
+        data = self.get_surface_scan_data()
+        if data is None:
+            return None
+        summary = {key: data.get(key) for key in self.SURFACE_SCAN_SETTINGS}
+        found, plan = data.get('surface_found_mask'), \
+            data.get('roi_scan_plan_mask')
+        if found is None or plan is None:
+            return summary
+        planned = np.asarray(plan) > 0
+        summary['surface_planned_columns'] = int(planned.sum())
+        summary['surface_planned_columns_with_surface'] = int(
+            (np.asarray(found)[planned] > 0).sum())
+
+        prescan = data.get('prescan_found_mask')
+        if prescan is None or self.positions is None:
+            return summary
+        grid_x, grid_y = self.positions['x'][0], self.positions['y'][0]
+        values = []
+        for i, x in enumerate(np.ravel(data['prescan_x'])):
+            for j, y in enumerate(np.ravel(data['prescan_y'])):
+                nearest = np.unravel_index(
+                    np.argmin((grid_x - x) ** 2 + (grid_y - y) ** 2),
+                    grid_x.shape)
+                if planned[nearest]:
+                    values.append(np.asarray(prescan)[i, j])
+        values = np.array(values)
+        summary['surface_prescan_columns_in_roi'] = int(values.size)
+        summary['surface_prescan_found'] = int((values == 1).sum())
+        summary['surface_prescan_filled_in'] = int((values == 2).sum())
+        summary['surface_prescan_not_found'] = int((values == 0).sum())
+        return summary
+
     # Background ROI polygon (BrillouinAcquisition's second, independent
     # ROI - see the Background class for the reference points it
     # captured). The drawn shape itself, not those points.
@@ -972,6 +1202,29 @@ class Payload(MeasurementData):
         'camera_spurious_noise_filter_used':
             'positions-camera-spurious-noise-filter-used',
         'background_roi_mask_used': 'positions-background-roi-mask-used',
+        # The overview engine and drift correction of BrillouinAcquisition,
+        # see get_overview_events()/get_runtime_drift().
+        'overview_engine_used': 'positions-overview-engine-used',
+        'overview_before_measurement_used':
+            'positions-overview-before-measurement-used',
+        'overview_after_measurement_used':
+            'positions-overview-after-measurement-used',
+        'overview_trigger_used': 'positions-overview-trigger-used',
+        'overview_brightfield_spread_across_scan_used':
+            'positions-overview-brightfield-spread-across-scan-used',
+        'overview_objective_retract_um_used':
+            'positions-overview-objective-retract-um-used',
+        'overview_measurement_objective_slot':
+            'positions-overview-measurement-objective-slot',
+        'drift_correction_used': 'positions-drift-correction-used',
+        'drift_objective_slot_used': 'positions-drift-objective-slot-used',
+        'drift_min_ncc_used': 'positions-drift-min-ncc-used',
+        'drift_max_step_um_used': 'positions-drift-max-step-um-used',
+        'drift_extrapolate_used': 'positions-drift-extrapolate-used',
+        'drift_carried_over_x_um': 'positions-drift-carried-over-x-um',
+        'drift_carried_over_y_um': 'positions-drift-carried-over-y-um',
+        # 0 never, 1 with every overview, 2 after every z plane
+        'surface_rescan_used': 'positions-surface-rescan-used',
     }
 
     def get_acquisition_settings(self):
@@ -996,79 +1249,566 @@ class Payload(MeasurementData):
             data[key] = np.array(ds).flatten()[0] if ds is not None else None
         return data
 
-    def has_overview_brightfield(self):
-        """
-        Returns whether stage positions for brightfield overview
-        images (recorded alongside a surface-following scan) are
-        present for this payload.
-        """
-        return self.group is not None and \
-            self.group.get('positions-overview-brightfield-x') is not None
+    # How the drift decision of an overview event is stored
+    # (overview-event-N-drift-decision).
+    DRIFT_DECISIONS = {
+        0: 'reference', 1: 'applied', 2: 'no match',
+        3: 'low confidence', 4: 'implausible'}
 
-    def get_overview_brightfield_positions(self):
-        """
-        Returns the stage positions of the brightfield overview
-        images recorded during the measurement.
+    def _positions_array(self, name):
+        """The dataset 'positions-<name>' as a flat float array, None if
+        the payload has none."""
+        if self.group is None:
+            return None
+        dataset = self.group.get('positions-' + name)
+        if dataset is None:
+            return None
+        return np.array(dataset, dtype=float).ravel()
 
-        BrillouinAcquisition versions with the BF overview coverage
-        modes update (multiple capture points per z-slice, with a
-        possibly non-uniform stack depth per point, e.g. one point
-        keeping its full z-stack while the others are single images)
-        write 'positions-overview-brightfield-point-count' and
-        '...-point-stack-counts' instead of the older, single
-        '...-tile-count'. Older files only have the latter, which
-        always implies a stack depth of 1 per point.
+    def _positions_array_with_length(self, name):
+        """Like _positions_array() for the numbers BrillouinAcquisition
+        writes with their length in front (everything of the resume
+        plan); without the length."""
+        values = self._positions_array(name)
+        if values is None or values.size == 0:
+            return None
+        return values[1:1 + int(values[0])]
+
+    def get_overview_events(self):
+        """
+        Returns the overview events the overview engine of
+        BrillouinAcquisition recorded during this repetition, in the
+        order they happened (empty list if there are none: older files,
+        or overviews switched off).
 
         Returns
         -------
-        out: dict or None
-            'x'/'y'/'z': ndarray, reshaped to (z_steps, total_per_z)
-                if more than one image was recorded per z-slice,
-                otherwise a flat 1D array of length z_steps.
-                total_per_z is the sum of 'point_stack_counts'; use it
-                together with 'point_stack_counts' to slice out each
-                point's own (contiguous) block of columns.
-            'point_count': int, number of distinct capture points
-                sampled per z-slice
-            'point_stack_counts': ndarray of int, length 'point_count',
-                the stack depth recorded for each of those points
-            'tile_count': int, kept for backward compatibility, equal
-                to total_per_z (the reshaped array's column count)
+        out: list of dict
+            'index': number of the event (the 'overview_event' of its
+                images),
+            'kind', 'kind_name' (before measurement, after z plane, after
+                repetition, after measurement), 'z_index', 'point_index'
+                (-1: before the first point), 'seconds_since_start',
+                'epoch_seconds', 'repetition',
+            'objectives': one dict per objective that took part: 'slot',
+                'is_measurement_objective', 'captured', 'tiles',
+                'stack_depth', 'images_saved', 'first_image_number',
+                'switch_to_seconds', 'capture_seconds',
+                'switch_back_seconds', 'fov_compensation' (x, y),
+                'focus_delta_um', 'retract_um',
+            'drift': None without drift correction, else a dict:
+                'evaluated', 'decision' (see DRIFT_DECISIONS),
+                'decision_name', 'step_um' (x, y), 'total_um' (x, y),
+                'grid_offset_after_um' (x, y), 'mean_ncc', 'tiles_compared',
+                'tiles_used', 'seconds_since_reference',
+                'registration_seconds', 'reference_replaced'.
         """
-        if not self.has_overview_brightfield():
-            return None
-        point_count_ds = self.group.get(
-            'positions-overview-brightfield-point-count')
-        if point_count_ds is not None:
-            point_count = int(np.array(point_count_ds).flatten()[0])
-            stack_counts_ds = self.group.get(
-                'positions-overview-brightfield-point-stack-counts')
-            point_stack_counts = np.array(
-                stack_counts_ds).flatten().astype(int) \
-                if stack_counts_ds is not None \
-                else np.ones(point_count, dtype=int)
-        else:
-            # Files from before the BF overview coverage modes update
-            # only wrote a single tile-count (always one image per
-            # point, i.e. a stack depth of 1).
-            tile_count_ds = self.group.get(
-                'positions-overview-brightfield-tile-count')
-            point_count = int(np.array(tile_count_ds).flatten()[0]) \
-                if tile_count_ds is not None else 1
-            point_stack_counts = np.ones(point_count, dtype=int)
+        if self.group is None:
+            return []
+        pattern = re.compile(r'^positions-overview-event-(\d+)-kind$')
+        indices = sorted(
+            int(match.group(1)) for match in
+            (pattern.match(name) for name in self.group.keys()) if match)
+        events = []
+        for index in indices:
+            prefix = 'overview-event-%04d-' % index
 
-        total_per_z = int(point_stack_counts.sum()) if point_count else 1
-        positions = {}
-        for axis in ('x', 'y', 'z'):
-            arr = np.array(
-                self.group.get('positions-overview-brightfield-' + axis))
-            if total_per_z > 1 and arr.size % total_per_z == 0:
-                arr = arr.reshape((-1, total_per_z))
-            positions[axis] = arr
-        positions['point_count'] = point_count
-        positions['point_stack_counts'] = point_stack_counts
-        positions['tile_count'] = total_per_z
-        return positions
+            def values(name, prefix=prefix):
+                return self._positions_array(prefix + name)
+
+            def scalar(name, default=None, values=values):
+                array = values(name)
+                return default if array is None or array.size == 0 \
+                    else float(array[0])
+
+            def pair(name, values=values):
+                array = values(name)
+                if array is None or array.size < 2:
+                    return None
+                return (float(array[0]), float(array[1]))
+
+            kind = scalar('kind')
+            kind = None if kind is None else int(kind)
+
+            objectives = []
+            slots = values('objective-slot')
+            for number in range(0 if slots is None else slots.size):
+                def at(name, default=None, number=number, values=values):
+                    array = values('objective-' + name)
+                    return default if array is None \
+                        or array.size <= number else float(array[number])
+                fov_x = at('fov-compensation-x-um')
+                fov_y = at('fov-compensation-y-um')
+                objectives.append({
+                    'slot': int(slots[number]),
+                    'is_measurement_objective': bool(
+                        at('is-measurement-objective', 0)),
+                    'captured': bool(at('captured', 0)),
+                    'tiles': int(at('tiles', 0)),
+                    'stack_depth': int(at('stack-depth', 0)),
+                    'images_saved': int(at('images-saved', 0)),
+                    'first_image_number': int(at('first-image-number', 0)),
+                    'switch_to_seconds': at('switch-to-seconds'),
+                    'capture_seconds': at('capture-seconds'),
+                    'switch_back_seconds': at('switch-back-seconds'),
+                    'fov_compensation': None if fov_x is None
+                    else (fov_x, fov_y),
+                    'focus_delta_um': at('focus-delta-um'),
+                    'retract_um': at('retract-um'),
+                })
+
+            drift = None
+            if values('drift-decision') is not None:
+                decision = scalar('drift-decision')
+                decision = None if decision is None else int(decision)
+                compared = values('drift-tiles-compared-used')
+                drift = {
+                    'evaluated': bool(scalar('drift-evaluated', 0)),
+                    'decision': decision,
+                    'decision_name': self.DRIFT_DECISIONS.get(decision),
+                    'step_um': pair('drift-step-um'),
+                    'total_um': pair('drift-total-um'),
+                    'grid_offset_after_um': pair('grid-offset-after-um'),
+                    'mean_ncc': scalar('drift-mean-ncc'),
+                    'tiles_compared': None if compared is None
+                    or compared.size < 2 else int(compared[0]),
+                    'tiles_used': None if compared is None
+                    or compared.size < 2 else int(compared[1]),
+                    'seconds_since_reference':
+                        scalar('drift-seconds-since-reference'),
+                    'registration_seconds':
+                        scalar('drift-registration-seconds'),
+                    # the reference of the previous run could not be used
+                    # and this overview became the new one
+                    'reference_replaced': bool(
+                        scalar('drift-reference-replaced', 0)),
+                }
+            events.append({
+                'index': index,
+                'kind': kind,
+                'kind_name': MeasurementData.OVERVIEW_KIND_NAMES.get(kind),
+                'z_index': int(scalar('z-index', 0)),
+                'point_index': int(scalar('point-index', -1)),
+                'seconds_since_start': scalar('seconds-since-start'),
+                'epoch_seconds': scalar('epoch-seconds'),
+                'repetition': scalar('repetition'),
+                'objectives': objectives,
+                'drift': drift,
+            })
+        return events
+
+    def get_scan_plan(self):
+        """
+        Returns the order the grid points were measured in, as stored
+        with the plan that Continue needs (BrillouinAcquisition),
+        or None for files without it.
+
+        Returns
+        -------
+        out: dict
+            'index_x', 'index_y', 'index_z': int arrays, the grid index
+                of the n-th measured point; 'address': the key of that
+                point in the payload (x runs fastest), so that
+                payload.data[str(address[n])] is the n-th point
+                measured.
+        """
+        if self.positions is None:
+            return None
+        index = [self._positions_array_with_length(
+            'resume-plan-index-' + axis) for axis in ('x', 'y', 'z')]
+        if any(array is None for array in index):
+            return None
+        index_x, index_y, index_z = (array.astype(int) for array in index)
+        nz, nx, ny = self.positions['x'].shape
+        if index_x.size == 0 or index_x.max() >= nx \
+                or index_y.max() >= ny or index_z.max() >= nz:
+            return None
+        return {
+            'index_x': index_x, 'index_y': index_y, 'index_z': index_z,
+            'address': index_x + nx * (index_y + ny * index_z),
+        }
+
+    def get_point_drift_offsets(self):
+        """
+        Returns the drift offset (um) that BrillouinAcquisition had added
+        to the stage target of each grid point (drift correction; 0
+        without), laid out like positions-x/y/z, i.e. arrays of shape
+        (nz, nx, ny) with NaN where nothing was measured. The point was
+        measured at positions-x/y + this offset, so the position of the
+        measurement on the sample is positions-x/y itself.
+
+        None for files without the record (before drift correction, or
+        no scan plan stored).
+        """
+        offset_x = self._positions_array('grid-offset-per-point-x-um')
+        offset_y = self._positions_array('grid-offset-per-point-y-um')
+        plan = self.get_scan_plan()
+        if offset_x is None or offset_y is None or plan is None \
+                or offset_x.size != plan['address'].size \
+                or offset_y.size != offset_x.size:
+            return None
+        shape = self.positions['x'].shape
+        result = {}
+        for axis, offsets in (('x', offset_x), ('y', offset_y)):
+            grid = np.full(shape, np.nan)
+            grid[plan['index_z'], plan['index_x'], plan['index_y']] = offsets
+            result[axis] = grid
+        return result
+
+    def get_runtime_drift(self):
+        """
+        Returns what the drift correction of BrillouinAcquisition did
+        during this repetition, or None if it was not switched on (or the
+        file predates it).
+
+        Returns
+        -------
+        out: dict
+            'objective_slot', 'min_ncc', 'max_step_um', 'extrapolate',
+            'carried_over': (x, y) um, the drift taken over from the
+                repetition before,
+            'events': the 'drift' parts of get_overview_events() that were
+                evaluated (with 'event', 'kind_name', 'seconds_since_start'),
+            'applied_events': how many of them moved the grid,
+            'max_offset_um': the largest offset any point was measured with,
+            'applied': True if the grid was moved at all (False: switched
+                on, but nothing could be registered - the CSV positions
+                are then not drift corrected).
+        """
+        if self.group is None:
+            return None
+        used = self._positions_array('drift-correction-used')
+        if used is None or used.size == 0 or not used[0]:
+            return None
+        events = []
+        for event in self.get_overview_events():
+            drift = event['drift']
+            if drift is not None and drift['evaluated']:
+                events.append(dict(
+                    drift, event=event['index'], kind_name=event['kind_name'],
+                    seconds_since_start=event['seconds_since_start']))
+        offsets = self.get_point_drift_offsets()
+        max_offset = 0.0
+        if offsets is not None:
+            with np.errstate(invalid='ignore'):
+                size = np.hypot(offsets['x'], offsets['y'])
+            if np.isfinite(size).any():
+                max_offset = float(np.nanmax(size))
+        applied_events = sum(1 for e in events if e['decision'] == 1)
+
+        def setting(name):
+            array = self._positions_array(name)
+            return None if array is None or array.size == 0 \
+                else float(array[0])
+
+        carried = (setting('drift-carried-over-x-um') or 0.0,
+                   setting('drift-carried-over-y-um') or 0.0)
+        return {
+            'objective_slot': setting('drift-objective-slot-used'),
+            'min_ncc': setting('drift-min-ncc-used'),
+            'max_step_um': setting('drift-max-step-um-used'),
+            'extrapolate': bool(setting('drift-extrapolate-used') or 0),
+            'carried_over': carried,
+            'events': events,
+            'applied_events': applied_events,
+            'max_offset_um': max_offset,
+            'applied': applied_events > 0 or max_offset > 0
+            or carried != (0.0, 0.0),
+        }
+
+    def get_resume_events(self):
+        """
+        Returns the notes BrillouinAcquisition left when the measurement
+        of this repetition was continued (Continue button), oldest first;
+        empty if it never was.
+
+        Returns
+        -------
+        out: list of dict
+            'index', 'point_index' (points done when it had stopped),
+            'points_total', 'resumed_epoch_seconds', 'was_cancelled'
+            (False: crash or power loss), 'incomplete_points_removed',
+            'previous_state', 'last_point_date', 'resumed_date'.
+        """
+        if self.group is None:
+            return []
+        pattern = re.compile(r'^positions-resume-event-(\d+)-point-index$')
+        indices = sorted(
+            int(match.group(1)) for match in
+            (pattern.match(name) for name in self.group.keys()) if match)
+        events = []
+        for index in indices:
+            prefix = 'resume-event-%04d-' % index
+
+            def number(name, prefix=prefix):
+                array = self._positions_array_with_length(prefix + name)
+                return None if array is None or array.size == 0 \
+                    else float(array[0])
+
+            def text(name, prefix=prefix):
+                value = _get_text_attribute(
+                    self.group, 'resume_' + prefix[len('resume-'):] + name)
+                # BrillouinAcquisition writes "s:" in front of every text
+                return value[2:] if value and value.startswith('s:') \
+                    else value
+
+            events.append({
+                'index': index,
+                'point_index': number('point-index'),
+                'points_total': number('points-total'),
+                'resumed_epoch_seconds': number('resumed-epoch-seconds'),
+                'was_cancelled': bool(number('was-cancelled') or 0),
+                'incomplete_points_removed': number(
+                    'incomplete-points-removed'),
+                'previous_state': text('previous-state'),
+                'last_point_date': text('last-point-date'),
+                'resumed_date': text('resumed-date'),
+            })
+        return events
+
+    def get_grid_definition(self):
+        """
+        Returns how the measurement grid was defined, or None if the
+        payload has no positions (nothing was measured).
+
+        Returns
+        -------
+        out: dict
+            'steps': {'x', 'y', 'z'} number of grid points,
+            'range_um': {'x', 'y', 'z'} -> (min, max) as configured (None
+                for files that do not carry them),
+            'step_um': {'x', 'y', 'z'} the spacing of the points derived
+                from steps and range (None for a single point),
+            'absolute_origin_um': {'x', 'y', 'z'}: the origin the
+                operator set for absolute grid coordinates,
+            'coordinates_absolute': bool or None,
+            'scan_loop_level': {'x', 'y', 'z'}: 0 = innermost loop ...
+                2 = outermost, as planned (None for older files),
+            'roi_polygon_um' / 'background_roi_polygon_um': (x, y) arrays
+                of the polygons drawn at acquisition time, or None.
+        """
+        if self.positions is None or self.resolution is None:
+            return None
+        axes = ('x', 'y', 'z')
+        steps = dict(zip(axes, self.resolution))
+        ranges, spacing, origin = {}, {}, {}
+        for axis in axes:
+            values = self._positions_array('grid-%s-range-um-used' % axis)
+            ranges[axis] = None if values is None or values.size < 2 \
+                else (float(values[0]), float(values[1]))
+            if ranges[axis] is not None and steps[axis] > 1:
+                spacing[axis] = (ranges[axis][1] - ranges[axis][0]) \
+                    / (steps[axis] - 1)
+            else:
+                spacing[axis] = None
+            value = self._positions_array('absolute-origin-' + axis)
+            origin[axis] = None if value is None or value.size == 0 \
+                else float(value[0])
+        absolute = self._positions_array('grid-coordinates-absolute')
+        order = self._positions_array('grid-scan-order-used')
+
+        def polygon(name):
+            x = self._positions_array(name + '-x-um')
+            y = self._positions_array(name + '-y-um')
+            if x is None or y is None or x.size == 0 or x.size != y.size:
+                return None
+            return (x, y)
+
+        return {
+            'steps': steps,
+            'range_um': ranges,
+            'step_um': spacing,
+            'absolute_origin_um': origin,
+            'coordinates_absolute': None if absolute is None
+            or absolute.size == 0 else bool(absolute[0]),
+            'scan_loop_level': None if order is None or order.size < 3
+            else dict(zip(axes, (int(v) for v in order[:3]))),
+            'roi_polygon_um': polygon('roi-polygon'),
+            'background_roi_polygon_um': polygon('background-roi-polygon'),
+        }
+
+    def raw_to_grid_frame(self, raw_xy):
+        """
+        The (x, y) of a raw position (stage + scanner, um - see
+        get_image_centre_raw()) in the frame of this repetition's
+        positions-x/y (and so of the CSV of a BrillouinExport), or None
+        if the file does not say which frame that is.
+
+        With absolute grid coordinates the frame is the raw position
+        minus the absolute origin of the grid; with relative ones it is
+        the raw position itself (BrillouinAcquisition's
+        Brillouin::rawPositionToGridFrame()).
+        """
+        if raw_xy is None:
+            return None
+        grid = self.get_grid_definition()
+        if grid is None or grid['coordinates_absolute'] is None:
+            return None
+        if not grid['coordinates_absolute']:
+            return (raw_xy[0], raw_xy[1])
+        origin = grid['absolute_origin_um']
+        if origin['x'] is None or origin['y'] is None:
+            return None
+        return (raw_xy[0] - origin['x'], raw_xy[1] - origin['y'])
+
+    def get_image_centre_shift(self, image_key):
+        """
+        (x, y) in um from the stage target of an image to its middle -
+        'image_centre_shift' plus 'fov_compensation' - or None if the
+        image was written without it. A target puts the laser on a point,
+        and the laser is where its marker was set in the camera image, not
+        in the middle (see get_overview_info()). BrillouinAcquisition
+        writes it with every brightfield image; tools/add_image_centres.py
+        added it to the images taken before.
+        """
+        shift = self._attribute_pair(
+            image_key, 'image_centre_shift_x_um', 'image_centre_shift_y_um')
+        if shift is None:
+            return None
+        fov = self._attribute_pair(
+            image_key, 'fov_compensation_x_um', 'fov_compensation_y_um',
+            (0.0, 0.0))
+        return (shift[0] + fov[0], shift[1] + fov[1])
+
+    def get_image_centre_raw(self, image_key):
+        """
+        The raw position (stage + scanner, um; the frame of
+        ScanControl::getPosition()) of the middle of an image taken in
+        the Fluorescence tab - 'stage_position_raw' minus the image
+        centre shift - or None if the image was written without them.
+
+        Such an image does not carry a position in the frame of the
+        Brillouin run: its 'position' is in the grid frame in force
+        when it was taken (before Start, so with another origin, or
+        none), and the laser target it describes is not the middle of
+        the image.
+        """
+        raw = self._attribute_pair(
+            image_key, 'stage_position_raw_x_um', 'stage_position_raw_y_um')
+        shift = self.get_image_centre_shift(image_key)
+        if raw is None or shift is None:
+            return None
+        return (raw[0] - shift[0], raw[1] - shift[1])
+
+    def get_overview_objectives(self):
+        """
+        Returns the calibrations of the objectives that took overviews
+        in this repetition (written before the measurement starts), by
+        slot; empty for files without them.
+
+        Returns
+        -------
+        out: dict of dict
+            slot -> {'magnification', 'micrometerToPixX',
+            'micrometerToPixY', 'pixToMicrometerX', 'pixToMicrometerY',
+            'origin' ((x, y) each), 'has_fov_offset', 'fov_offset' (x, y),
+            'fov_offset_sigma_um', 'has_focus_offset', 'focus_offset_um',
+            'focus_offset_sigma_um', 'is_reference_objective'}
+        """
+        if self.group is None:
+            return {}
+        pattern = re.compile(r'^positions-overview-objective-(\d+)-'
+                             r'magnification$')
+        slots = sorted(int(match.group(1)) for match in
+                       (pattern.match(name) for name in self.group.keys())
+                       if match)
+        result = {}
+        for slot in slots:
+            prefix = 'overview-objective-%d-' % slot
+
+            def array(name, prefix=prefix):
+                return self._positions_array(prefix + name)
+
+            def first(name, array=array):
+                values = array(name)
+                return None if values is None or values.size == 0 \
+                    else float(values[0])
+
+            def pair(name, array=array):
+                values = array(name)
+                return None if values is None or values.size < 2 \
+                    else (float(values[0]), float(values[1]))
+
+            fov = array('fov-offset-um')
+            focus = array('focus-offset-um')
+            result[slot] = {
+                'magnification': first('magnification'),
+                'micrometerToPixX': pair('micrometer-to-pix-x'),
+                'micrometerToPixY': pair('micrometer-to-pix-y'),
+                'pixToMicrometerX': pair('pix-to-micrometer-x'),
+                'pixToMicrometerY': pair('pix-to-micrometer-y'),
+                'origin': pair('origin-pix'),
+                'has_fov_offset': None if fov is None or fov.size < 4
+                else bool(fov[0]),
+                'fov_offset': None if fov is None or fov.size < 4
+                else (float(fov[1]), float(fov[2])),
+                'fov_offset_sigma_um': None if fov is None or fov.size < 4
+                else float(fov[3]),
+                'has_focus_offset': None if focus is None or focus.size < 3
+                else bool(focus[0]),
+                'focus_offset_um': None if focus is None or focus.size < 3
+                else float(focus[1]),
+                'focus_offset_sigma_um': None if focus is None
+                or focus.size < 3 else float(focus[2]),
+                'is_reference_objective': bool(
+                    first('is-reference-objective') or 0),
+            }
+        return result
+
+    def get_surface_rescans(self):
+        """
+        Returns the repeated surface scans of this repetition (setting
+        'surface rescan': with every overview or after every z plane),
+        oldest first; empty if the surface was scanned only once.
+
+        Each entry has 'index', 'success', 'point_index' (the point the
+        scan was repeated after), 'seconds_since_start',
+        'duration_seconds', 'grid_offset_um' (x, y),
+        'total_columns', 'failed_columns', 'points_without_new_surface'
+        (those keep their old z), 'prior_used' and 'reference_threshold'.
+        The surface found is in the 'positions-surface-rescan-NNNN-*'
+        datasets (prescan-x-um, prescan-z-um, ...).
+        """
+        if self.group is None:
+            return []
+        pattern = re.compile(r'^positions-surface-rescan-(\d+)-success$')
+        indices = sorted(int(match.group(1)) for match in
+                         (pattern.match(name) for name in self.group.keys())
+                         if match)
+        rescans = []
+        for index in indices:
+            prefix = 'surface-rescan-%04d-' % index
+
+            def array(name, prefix=prefix):
+                return self._positions_array(prefix + name)
+
+            def first(name, array=array):
+                values = array(name)
+                return None if values is None or values.size == 0 \
+                    else float(values[0])
+
+            columns = array('total-columns-failed-columns')
+            offset = array('grid-offset-um')
+            rescans.append({
+                'index': index,
+                'success': bool(first('success') or 0),
+                'point_index': None if first('point-index') is None
+                else int(first('point-index')),
+                'seconds_since_start': first('seconds-since-start'),
+                'duration_seconds': first('duration-seconds'),
+                'grid_offset_um': None if offset is None or offset.size < 2
+                else (float(offset[0]), float(offset[1])),
+                'total_columns': None if columns is None or columns.size < 2
+                else int(columns[0]),
+                'failed_columns': None if columns is None or columns.size < 2
+                else int(columns[1]),
+                'points_without_new_surface': None
+                if first('points-without-new-surface') is None
+                else int(first('points-without-new-surface')),
+                'prior_used': bool(first('prior-used') or 0),
+                'reference_threshold': first('reference-threshold'),
+            })
+        return rescans
 
     # Keys of get_scale_calibration()'s return value that are
     # point-style (an (x, y) tuple, or None if missing) rather than a
@@ -1160,12 +1900,6 @@ class Calibration(MeasurementData):
             Calibration data of a repetition from an HDF file.
         """
         super(Calibration, self).__init__(payload_group, repetition)
-        """
-        For H5BM files < 0.0.4
-        there was an inconsistency with the group naming
-        """
-        if self.data is None and payload_group is not None:
-            self.data = payload_group.get('calibrationData')
 
 
 class Background(MeasurementData):

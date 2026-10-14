@@ -40,9 +40,9 @@ def test_file_has_one_repetition():
     num_repetitions = bf.repetition_count()
     assert num_repetitions == 1
 
-    bf = BrillouinFile(data_file_path('Water_old.h5'))
-    num_repetitions = bf.repetition_count()
-    assert num_repetitions == 1
+    # files of the format before H5BM-v0.0.4 are not supported
+    with pytest.raises(BadFileException):
+        BrillouinFile(data_file_path('Water_old.h5'))
 
 
 def test_non_existing_file_raises_exception():
@@ -68,11 +68,6 @@ def test_open_file_with_no_brillouin_data_raises_exception():
 
 def test_file_get_repetition_keys():
     bf = BrillouinFile(data_file_path('Water.h5'))
-    assert bf.repetition_keys() == ['0']
-
-    assert bf.repetition_keys('Fluorescence') == []
-
-    bf = BrillouinFile(data_file_path('Water_old.h5'))
     assert bf.repetition_keys() == ['0']
 
     assert bf.repetition_keys('Fluorescence') == []
@@ -106,10 +101,6 @@ def test_file_get_positions():
 
 def test_file_repetition_has_calibration():
     bf = BrillouinFile(data_file_path('Water.h5'))
-    rep = bf.get_repetition('0')
-    assert not rep.calibration.is_empty()
-
-    bf = BrillouinFile(data_file_path('Water_old.h5'))
     rep = bf.get_repetition('0')
     assert not rep.calibration.is_empty()
 
@@ -167,17 +158,9 @@ def test_file_payload_image_keys():
     rep = bf.get_repetition('0')
     assert rep.payload.image_keys() == [str(k) for k in range(10)]
 
-    bf = BrillouinFile(data_file_path('Water_old.h5'))
-    rep = bf.get_repetition('0')
-    assert rep.payload.image_keys() == [str(k) for k in range(4)]
-
 
 def test_file_payload_get_image():
     bf = BrillouinFile(data_file_path('Water.h5'))
-    image = bf.get_repetition('0').payload.get_image('0')
-    assert image.shape == (2, 400, 400)
-
-    bf = BrillouinFile(data_file_path('Water_old.h5'))
     image = bf.get_repetition('0').payload.get_image('0')
     assert image.shape == (2, 400, 400)
 
@@ -197,10 +180,6 @@ def test_file_payload_get_time():
 
 def test_file_calibration_image_keys():
     bf = BrillouinFile(data_file_path('Water.h5'))
-    rep = bf.get_repetition('0')
-    assert rep.calibration.image_keys() == [str(k+1) for k in range(2)]
-
-    bf = BrillouinFile(data_file_path('Water_old.h5'))
     rep = bf.get_repetition('0')
     assert rep.calibration.image_keys() == [str(k+1) for k in range(2)]
 
@@ -305,8 +284,6 @@ def test_file_has_no_surface_scan_data_by_default():
     rep = bf.get_repetition('0')
     assert not rep.payload.has_surface_scan()
     assert rep.payload.get_surface_scan_data() is None
-    assert not rep.payload.has_overview_brightfield()
-    assert rep.payload.get_overview_brightfield_positions() is None
 
 
 def test_file_reconstructs_surface_follow_z_from_sampled_path(tmp_path):
@@ -417,6 +394,67 @@ def test_file_get_surface_scan_data():
     assert data['surface_verification_steps_used'] == 3
 
 
+def test_file_get_surface_follow_summary():
+    bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
+    rep = bf.get_repetition('0')
+    summary = rep.payload.get_surface_follow_summary()
+    data = rep.payload.get_surface_scan_data()
+    planned = data['roi_scan_plan_mask'] > 0
+    assert summary['surface_follow_used'] == 1
+    assert summary['surface_z_offset_um_used'] == 2.5
+    assert summary['surface_planned_columns'] == int(planned.sum())
+    assert summary['surface_planned_columns_with_surface'] == int(
+        (data['surface_found_mask'][planned] > 0).sum())
+    # this file has no coarse pre-scan: no pre-scan counts
+    assert 'surface_prescan_columns_in_roi' not in summary
+
+
+def test_file_get_surface_follow_summary_absent_without_surface_scan():
+    bf = BrillouinFile(data_file_path('Water.h5'))
+    assert bf.get_repetition('0').payload.get_surface_follow_summary() is None
+
+
+def test_file_surface_follow_summary_counts_the_prescan_columns_in_the_roi(
+        tmp_path):
+    nx, ny = 3, 2
+
+    def populate(group):
+        group.attrs['resolution-x'] = [nx]
+        group.attrs['resolution-y'] = [ny]
+        group.attrs['resolution-z'] = [1]
+        x = np.array([10.0, 20.0, 30.0])
+        y = np.array([100.0, 200.0])
+        group.create_dataset(
+            'positions-x', data=np.tile(x.reshape(1, nx, 1), (1, 1, ny)))
+        group.create_dataset(
+            'positions-y', data=np.tile(y.reshape(1, 1, ny), (1, nx, 1)))
+        group.create_dataset('positions-z', data=np.zeros((1, nx, ny)))
+        # the middle column is outside the planned ROI
+        plan = np.ones((nx, ny))
+        plan[1, :] = 0
+        group.create_dataset('positions-roi-scan-plan-mask', data=plan)
+        group.create_dataset('positions-surface-found-mask',
+                             data=np.array([[1, 2], [0, 0], [2, 1]]))
+        # coarse pre-scan on the first and last column only
+        group.create_dataset('positions-surface-prescan-x-um',
+                             data=np.array([10.0, 30.0]))
+        group.create_dataset('positions-surface-prescan-y-um',
+                             data=np.array([100.0, 200.0]))
+        group.create_dataset('positions-surface-prescan-found-mask',
+                             data=np.array([[1, 0], [2, 1]]))
+        group.create_dataset('positions-surface-follow-used',
+                             data=np.array([1.0]))
+
+    payload = _make_payload(tmp_path, 'prescan_summary.h5', populate)
+    summary = payload.get_surface_follow_summary()
+    assert summary['surface_planned_columns'] == 4
+    assert summary['surface_planned_columns_with_surface'] == 4
+    assert summary['surface_prescan_columns_in_roi'] == 4
+    assert summary['surface_prescan_found'] == 2
+    assert summary['surface_prescan_filled_in'] == 1
+    assert summary['surface_prescan_not_found'] == 1
+
+
 def test_file_get_background_roi_absent_by_default():
     bf = BrillouinFile(data_file_path('Water.h5'))
     rep = bf.get_repetition('0')
@@ -520,18 +558,6 @@ def test_file_get_acquisition_settings(tmp_path):
     assert settings['con_calibration_used'] is None
 
 
-def test_file_get_overview_brightfield_positions():
-    bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
-    rep = bf.get_repetition('0')
-    assert rep.payload.has_overview_brightfield()
-
-    positions = rep.payload.get_overview_brightfield_positions()
-    assert positions['tile_count'] == 2
-    assert positions['x'].shape == (2, 2)
-    assert positions['y'].shape == (2, 2)
-    assert positions['z'].shape == (2, 2)
-
-
 def _make_payload(tmp_path, name, populate):
     """
     Creates a standalone HDF5 payload group (not a full BrillouinFile) in
@@ -543,84 +569,6 @@ def _make_payload(tmp_path, name, populate):
     group = h5.create_group('payload')
     populate(group)
     return Payload(group, None)
-
-
-def test_file_get_overview_brightfield_positions_point_count_uniform(
-        tmp_path):
-    # New-format file: point-count/point-stack-counts with a uniform
-    # stack depth of 1 per point (2 points per z-slice, 2 z-slices).
-    def populate(group):
-        group.create_dataset(
-            'positions-overview-brightfield-x', data=np.arange(4.))
-        group.create_dataset(
-            'positions-overview-brightfield-y', data=np.arange(4.))
-        group.create_dataset(
-            'positions-overview-brightfield-z', data=np.arange(4.))
-        group.create_dataset(
-            'positions-overview-brightfield-point-count', data=[2])
-        group.create_dataset(
-            'positions-overview-brightfield-point-stack-counts',
-            data=[1, 1])
-
-    payload = _make_payload(tmp_path, 'uniform.h5', populate)
-    assert payload.has_overview_brightfield()
-
-    positions = payload.get_overview_brightfield_positions()
-    assert positions['point_count'] == 2
-    assert list(positions['point_stack_counts']) == [1, 1]
-    assert positions['tile_count'] == 2
-    assert positions['x'].shape == (2, 2)
-
-
-def test_file_get_overview_brightfield_positions_non_uniform_stack(
-        tmp_path):
-    # New-format file with a non-uniform per-point stack depth: one
-    # point kept its full z-stack (depth 3), the other is a single
-    # image (depth 1) -> total_per_z = 4, over 2 z-slices = 8 values.
-    def populate(group):
-        group.create_dataset(
-            'positions-overview-brightfield-x', data=np.arange(8.))
-        group.create_dataset(
-            'positions-overview-brightfield-y', data=np.arange(8.))
-        group.create_dataset(
-            'positions-overview-brightfield-z', data=np.arange(8.))
-        group.create_dataset(
-            'positions-overview-brightfield-point-count', data=[2])
-        group.create_dataset(
-            'positions-overview-brightfield-point-stack-counts',
-            data=[1, 3])
-
-    payload = _make_payload(tmp_path, 'nonuniform.h5', populate)
-
-    positions = payload.get_overview_brightfield_positions()
-    assert positions['point_count'] == 2
-    assert list(positions['point_stack_counts']) == [1, 3]
-    # total_per_z = 1 + 3 = 4, reshaped over 2 z-slices
-    assert positions['tile_count'] == 4
-    assert positions['x'].shape == (2, 4)
-
-
-def test_file_get_overview_brightfield_positions_old_format_fallback(
-        tmp_path):
-    # Files from before the point-count/point-stack-counts update only
-    # wrote a single tile-count (implying a stack depth of 1 per tile).
-    def populate(group):
-        group.create_dataset(
-            'positions-overview-brightfield-x', data=np.arange(4.))
-        group.create_dataset(
-            'positions-overview-brightfield-y', data=np.arange(4.))
-        group.create_dataset(
-            'positions-overview-brightfield-z', data=np.arange(4.))
-        group.create_dataset(
-            'positions-overview-brightfield-tile-count', data=[2])
-
-    payload = _make_payload(tmp_path, 'oldformat.h5', populate)
-
-    positions = payload.get_overview_brightfield_positions()
-    assert positions['point_count'] == 2
-    assert list(positions['point_stack_counts']) == [1, 1]
-    assert positions['tile_count'] == 2
-    assert positions['x'].shape == (2, 2)
 
 
 def test_file_get_position_and_stage_position(tmp_path):
@@ -660,7 +608,7 @@ def test_file_get_overview_brightfield_images():
     mode = 'Fluorescence'
     rep = bf.get_repetition('0', mode)
 
-    keys = rep.payload.image_keys_by_channel('Brightfield z overview')
+    keys = rep.payload.image_keys_by_channel('Brightfield overview')
     assert keys == ['0', '1', '2', '3']
 
     # Other channel values yield no matches
@@ -670,12 +618,12 @@ def test_file_get_overview_brightfield_images():
     assert image.shape == (1, 20, 20)
 
 
-def test_file_get_brillouin_repetition_index_absent_by_default():
+def test_file_get_brillouin_repetition_index():
     bf = BrillouinFile(data_file_path('SurfaceScan.h5'))
     rep = bf.get_repetition('0', 'Fluorescence')
-    keys = rep.payload.image_keys_by_channel('Brightfield z overview')
-    # SurfaceScan.h5 predates brillouin_repetition_index.
-    assert rep.payload.get_brillouin_repetition_index(keys[0]) is None
+    keys = rep.payload.image_keys_by_channel('Brightfield overview')
+    # (the file was converted with tools/migrate_legacy_overviews.py)
+    assert rep.payload.get_brillouin_repetition_index(keys[0]) == 0
 
 
 def test_file_get_brillouin_repetition_index(tmp_path):

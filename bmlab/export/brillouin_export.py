@@ -1,4 +1,5 @@
 import csv
+import datetime
 import logging
 import os
 import warnings
@@ -208,6 +209,12 @@ class BrillouinExport(object):
             brillouin_repetition).payload.get_scale_calibration()
         acquisition_settings = self.file.get_repetition(
             brillouin_repetition).payload.get_acquisition_settings()
+        surface_summary = self.file.get_repetition(
+            brillouin_repetition).payload.get_surface_follow_summary()
+        runtime_drift = self.file.get_repetition(
+            brillouin_repetition).payload.get_runtime_drift()
+        acquisition_state = self.file.get_repetition(
+            brillouin_repetition).acquisition_state
 
         # Grid points outside the measured ROI have no image key at all,
         # so EvaluationController.evaluate()'s per-point loop never
@@ -334,6 +341,77 @@ class BrillouinExport(object):
                     if value is not None:
                         writer.writerow([f'#{key}', value])
 
+            # The surface-follow settings and how well the surface was
+            # found (see Payload.get_surface_follow_summary()) - only
+            # for repetitions that carry surface-scan data.
+            if surface_summary is not None:
+                for key, value in surface_summary.items():
+                    if value is not None:
+                        writer.writerow([f'#{key}', value])
+
+            # How the grid was defined (see Payload.get_grid_definition()).
+            # x, y, z below are the points of this grid in um; a loop
+            # level of 0 is the innermost loop. The polygons are the ROI
+            # drawn at acquisition time, as ';'-separated lists.
+            grid = self.file.get_repetition(
+                brillouin_repetition).payload.get_grid_definition()
+            if grid is not None:
+                for axis in ('x', 'y', 'z'):
+                    writer.writerow([f'#grid_{axis}_steps',
+                                     grid['steps'][axis]])
+                    if grid['range_um'][axis] is not None:
+                        writer.writerow([f'#grid_{axis}_min_um',
+                                         grid['range_um'][axis][0]])
+                        writer.writerow([f'#grid_{axis}_max_um',
+                                         grid['range_um'][axis][1]])
+                    if grid['step_um'][axis] is not None:
+                        writer.writerow([f'#grid_{axis}_step_um',
+                                         grid['step_um'][axis]])
+                    if grid['absolute_origin_um'][axis] is not None:
+                        writer.writerow([f'#grid_absolute_origin_{axis}_um',
+                                         grid['absolute_origin_um'][axis]])
+                    if grid['scan_loop_level'] is not None:
+                        writer.writerow([f'#grid_scan_loop_level_{axis}',
+                                         grid['scan_loop_level'][axis]])
+                already = surface_summary is not None and surface_summary.get(
+                    'grid_coordinates_absolute') is not None
+                if grid['coordinates_absolute'] is not None and not already:
+                    writer.writerow(['#grid_coordinates_absolute',
+                                     grid['coordinates_absolute']])
+                for name in ('roi_polygon_um', 'background_roi_polygon_um'):
+                    if grid[name] is not None:
+                        for axis, values in zip(('x', 'y'), grid[name]):
+                            writer.writerow([
+                                f'#{name[:-3]}_{axis}_um',
+                                ';'.join(f'{v:.2f}' for v in values)])
+
+            # How the repetition ended (Continue/resume versions only):
+            # anything but 'finished' is a measurement that was stopped.
+            if acquisition_state is not None:
+                writer.writerow(['#acquisition_state', acquisition_state])
+
+            # Drift correction BrillouinAcquisition did while measuring
+            # (settings in the lines above: drift_correction_used, ...).
+            # x and y are the planned grid positions; when the correction
+            # moved the grid, the stage was sent to x + the offset of that
+            # moment and x is the position ON THE SAMPLE (the offsets are
+            # in the runtime drift file, see _write_runtime_drift_csv()).
+            # If it was switched on but never registered an overview
+            # ('no match'), nothing was corrected and the offline drift
+            # correction is still needed.
+            if runtime_drift is not None:
+                writer.writerow(
+                    ['#drift_runtime_applied', runtime_drift['applied']])
+                writer.writerow(['#drift_runtime_applied_events',
+                                 runtime_drift['applied_events']])
+                writer.writerow(['#drift_runtime_evaluated_events',
+                                 len(runtime_drift['events'])])
+                writer.writerow(['#drift_runtime_max_offset_um',
+                                 runtime_drift['max_offset_um']])
+                writer.writerow(['#drift_runtime_decisions', ';'.join(
+                    f"{e['event']}:{e['decision_name']}"
+                    for e in runtime_drift['events'])])
+
             header = ['x', 'y', 'z'] + [name for name, _ in columns]
             writer.writerow(header)
 
@@ -344,3 +422,91 @@ class BrillouinExport(object):
                        *(col[valid] for _, col in columns))
             for row in rows:
                 writer.writerow(row)
+
+        if runtime_drift is not None:
+            self._write_runtime_drift_csv(
+                csv_filename, brillouin_repetition, runtime_drift)
+
+    def _write_runtime_drift_csv(
+            self, csv_filename, brillouin_repetition, runtime_drift):
+        """
+        Writes <name>_BMrep<N>_runtime_drift.csv next to the data CSV for a
+        repetition in which BrillouinAcquisition's drift correction was
+        switched on: one line per overview event that was evaluated, with
+        everything the acquisition recorded about it (the decision, the
+        step against the last accepted overview, the drift since the
+        reference, the grid offset after the event, the correlation, the
+        tiles compared and used, ...). The offset a point was measured
+        with is the grid offset after the last event before it, so this
+        is all that is needed to reconstruct the correction - there is no
+        second copy of the data with the points moved. The data CSV keeps
+        the planned positions x, y, which already are the positions on
+        the sample for every step that was applied.
+        """
+        payload = self.file.get_repetition(brillouin_repetition).payload
+        events = {event['index']: event
+                  for event in payload.get_overview_events()}
+        out = csv_filename.with_name(
+            csv_filename.name.replace('_data.csv', '_runtime_drift.csv'))
+        columns = [
+            'event', 'kind', 'z_index', 'point_index', 'epoch_seconds',
+            'time_utc', 'seconds_since_start', 'decision', 'step_x_um',
+            'step_y_um', 'total_x_um', 'total_y_um',
+            'grid_offset_after_x_um', 'grid_offset_after_y_um',
+            'mean_ncc', 'tiles_compared', 'tiles_used',
+            'seconds_since_last_accepted', 'registration_seconds',
+            'reference_replaced']
+
+        def pair(values, index):
+            return '' if values is None else values[index]
+
+        with open(out, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, lineterminator='\n')
+            for key, value in (
+                    ('#source_file', self.file.path.name),
+                    ('#repetition', brillouin_repetition),
+                    ('#drift_objective_slot', runtime_drift['objective_slot']),
+                    ('#drift_min_ncc', runtime_drift['min_ncc']),
+                    ('#drift_max_step_um', runtime_drift['max_step_um']),
+                    ('#drift_extrapolate', runtime_drift['extrapolate']),
+                    ('#drift_carried_over_x_um',
+                     runtime_drift['carried_over'][0]),
+                    ('#drift_carried_over_y_um',
+                     runtime_drift['carried_over'][1]),
+                    ('#drift_applied', runtime_drift['applied']),
+                    ('#drift_applied_events',
+                     runtime_drift['applied_events'])):
+                writer.writerow([key, value])
+            writer.writerow([
+                '#decision: reference (first overview) / applied / '
+                'no match (no overview of the reference could be '
+                'paired: nothing was measured) / low confidence / '
+                'implausible. step: against the last accepted overview; '
+                'total: since the reference; grid_offset_after: what '
+                'the stage targets of the following points were moved '
+                'by (zero without an applied step). Rejected events do '
+                'not move the grid. seconds_since_last_accepted: time since the '
+                'last overview that was accepted (the dataset in the file '
+                'is called seconds-since-reference). reference_replaced = 1: the reference '
+                'of the previous run could not be used and this overview '
+                'became the new reference.'])
+            writer.writerow(columns)
+            for drift in runtime_drift['events']:
+                event = events.get(drift['event'], {})
+                epoch = event.get('epoch_seconds')
+                time_utc = datetime.datetime.fromtimestamp(
+                    epoch, tz=datetime.timezone.utc).isoformat(
+                        timespec='seconds') if epoch else ''
+                writer.writerow([
+                    drift['event'], drift['kind_name'],
+                    event.get('z_index', ''), event.get('point_index', ''),
+                    '' if epoch is None else int(epoch), time_utc,
+                    drift['seconds_since_start'], drift['decision_name'],
+                    pair(drift['step_um'], 0), pair(drift['step_um'], 1),
+                    pair(drift['total_um'], 0), pair(drift['total_um'], 1),
+                    pair(drift['grid_offset_after_um'], 0),
+                    pair(drift['grid_offset_after_um'], 1),
+                    drift['mean_ncc'], drift['tiles_compared'],
+                    drift['tiles_used'], drift['seconds_since_reference'],
+                    drift['registration_seconds'],
+                    int(drift['reference_replaced'])])

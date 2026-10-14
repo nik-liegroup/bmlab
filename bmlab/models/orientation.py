@@ -3,10 +3,15 @@ from bmlab.serializer import Serializer
 
 class Orientation(Serializer):
 
-    def __init__(self, rotation=0,
-                 reflection={'vertically': False, 'horizontally': False}):
+    def __init__(self, rotation=0, reflection=None):
         self.rotation = rotation
-        self.reflection = reflection
+        # Every instance gets its own dict: a default value in the
+        # signature would be shared, and set_reflection() changes it in
+        # place, so a reflection set on one session would show up in
+        # every Orientation created afterwards.
+        self.reflection = {'vertically': False, 'horizontally': False}
+        if reflection is not None:
+            self.reflection.update(reflection)
 
     def set_rotation(self, num_rots):
         self.rotation = num_rots

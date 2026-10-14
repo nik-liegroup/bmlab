@@ -9,6 +9,7 @@ from math import floor
 
 from bmlab import Session
 from bmlab.fits import fit_vipa, VIPA, fit_lorentz_region
+from bmlab.double_peak import has_double_peak
 from bmlab.image import extract_lines_along_arc, find_max_in_radius
 from bmlab.export import FluorescenceExport, \
     FluorescenceCombinedExport, BrillouinExport, \
@@ -328,12 +329,13 @@ class CalibrationController(ImageController):
             peaks = cm.get_sorted_peaks(calib_key, frame_num)
 
             params = fit_vipa(peaks, setup)
-            if params is None:
-                continue
-            vipa_params.append(params)
-            xdata = np.arange(len(spectrum))
+            if params is not None:
+                vipa_params.append(params)
+                xdata = np.arange(len(spectrum))
 
-            frequencies.append(VIPA(xdata, params) - setup.f0)
+                frequencies.append(VIPA(xdata, params) - setup.f0)
+            # A frame without a fit is done too: whoever shows the
+            # progress waits for count to reach max_count
             if count is not None:
                 count.value += 1
 
@@ -572,6 +574,12 @@ class EvaluationController(ImageController):
         # so changing nr_brillouin_peaks during evaluation
         # does not create issues
         nr_brillouin_peaks = evm.nr_brillouin_peaks
+        # Points may have different numbers of frames (adaptive frame
+        # extension), so the frame axis must fit the largest one
+        nr_images = max(
+            [len(spectra)] + [
+                self.session.current_repetition().payload.get_image_count(
+                    key) for key in image_keys])
         evm.initialize_results_arrays({
             # measurement points in x direction
             'dim_x': resolution[0],
@@ -580,7 +588,7 @@ class EvaluationController(ImageController):
             # measurement points in z direction
             'dim_z': resolution[2],
             # number of images per measurement point
-            'nr_images': len(spectra),
+            'nr_images': nr_images,
             # number of Brillouin regions
             'nr_brillouin_regions': len(brillouin_regions),
             # number of peaks to fit per region
@@ -589,10 +597,21 @@ class EvaluationController(ImageController):
             'nr_rayleigh_regions': len(rayleigh_regions),
         })
 
+        # Which points are fit from their summed spectra (see
+        # EvaluationModel.evaluation_mode): all in 'sum' mode, in 'auto'
+        # mode those with more frames than the static frame count
+        static_frames = _static_frame_count(self.session)
+
+        def sum_frames(nr_frames):
+            if evm.evaluation_mode == 'sum':
+                return True
+            return evm.evaluation_mode == 'auto' \
+                and static_frames is not None and nr_frames > static_frames
+
         # Initialize the Rayleigh shift
         # used for compensating drifts
         rayleigh_peak_initial =\
-            np.nan * np.ones((len(spectra), len(rayleigh_regions), 1))
+            np.nan * np.ones((nr_images, len(rayleigh_regions), 1))
         # Loop over all measurement positions
         for idx, image_key in enumerate(image_keys):
 
@@ -612,10 +631,12 @@ class EvaluationController(ImageController):
                 self.extract_spectra(image_key)
             if spectra is None:
                 continue
-            evm.results['time'][ind_x, ind_y, ind_z, :, 0, 0] =\
+            nr_frames = len(spectra)
+            combine = sum_frames(nr_frames)
+            evm.results['time'][ind_x, ind_y, ind_z, :nr_frames, 0, 0] =\
                 times
-            evm.results['intensity'][ind_x, ind_y, ind_z, :, 0, 0] =\
-                intensities
+            evm.results['intensity'][
+                ind_x, ind_y, ind_z, :nr_frames, 0, 0] = intensities
 
             frequencies = cm.get_frequencies_by_time(times)
             # If we don't have frequency axis, we cannot evaluate on it
@@ -644,8 +665,14 @@ class EvaluationController(ImageController):
                     evm.results[
                         'brillouin_peak_center_uncertainty'][ind] =\
                         results[frame_num][6]
+                    # Same value for every stored peak index
+                    evm.results['brillouin_double_peak'][
+                        ind_x, ind_y, ind_z, frame_num, region_key, :] =\
+                        has_double_peak(
+                            region, frequencies[frame_num],
+                            spectra[frame_num])
 
-                if evm.evaluation_mode == 'sum':
+                if combine:
                     combined = self.fit_spectrum_combined(
                         spectra, frequencies, region)
                     ind_c = (ind_x, ind_y, ind_z,
@@ -692,7 +719,7 @@ class EvaluationController(ImageController):
                         'rayleigh_peak_center_uncertainty'][ind] =\
                         results[frame_num][6]
 
-                if evm.evaluation_mode == 'sum':
+                if combine:
                     combined = self.fit_spectrum_combined(
                         spectra, frequencies, region)
                     ind_c = (ind_x, ind_y, ind_z,
@@ -725,8 +752,8 @@ class EvaluationController(ImageController):
             # the multi-peak fit bounds given in GHz into the position
             # in pixels.
             if nr_brillouin_peaks > 1:
-                ind =\
-                    (ind_x, ind_y, ind_z, slice(None), slice(None), 0)
+                ind = (ind_x, ind_y, ind_z,
+                       slice(0, nr_frames), slice(None), 0)
                 rayleigh_peaks = np.transpose(
                     evm.results['rayleigh_peak_position_f'][ind]
                 )
@@ -748,7 +775,7 @@ class EvaluationController(ImageController):
                 # expect, just with nr "times" == 1 (the combined fit is
                 # a single fit, not one per frame).
                 bounds_w0_combined = bounds_fwhm_combined = None
-                if evm.evaluation_mode == 'sum':
+                if combine:
                     ind_rc = (ind_x, ind_y, ind_z,
                              slice(0, 1), slice(None), 0)
                     rayleigh_peaks_combined = np.transpose(
@@ -799,7 +826,7 @@ class EvaluationController(ImageController):
                             'brillouin_peak_center_uncertainty'][ind] = \
                             results_multi_peak[frame_num][6]
 
-                    if evm.evaluation_mode == 'sum':
+                    if combine:
                         bw0 = bounds_w0_combined[region_key][0] \
                             if bounds_w0_combined is not None else None
                         bfwhm = bounds_fwhm_combined[region_key][0] \
@@ -1109,20 +1136,17 @@ class EvaluationController(ImageController):
                           r'$' + axis_label + '$ [$\\mu$m]', ['x', 'y', 'z']))
 
         evm = self.session.evaluation_model()
-        # 'sum' mode (see EvaluationModel.evaluation_mode): transparently
-        # redirect fit-derived keys to their single-sum-fit '_combined'
-        # backing array instead of the per-frame one - this one redirect
-        # is what makes QUALITY_METRIC_KEYS thresholds, the GUI plot and
-        # CSV export all pick up sum-mode values with no changes needed
-        # anywhere else, since they all go through get_data(). The
-        # original parameter_key is kept for everything else below (e.g.
+        # 'sum'/'auto' mode (see EvaluationModel.evaluation_mode): fit-
+        # derived keys transparently come from their single-sum-fit
+        # '_combined' backing array for the points fit that way (see
+        # reported_results()) - this one redirect is what makes
+        # QUALITY_METRIC_KEYS thresholds, the GUI plot and CSV export
+        # all pick up those values with no changes needed anywhere else,
+        # since they all go through get_data(). The original
+        # parameter_key is kept for everything else below (e.g.
         # evm.parameters[parameter_key]['scaling']) - '_combined' keys
         # are not registered in evm.parameters.
-        results_key = parameter_key
-        if evm.evaluation_mode == 'sum' \
-                and (parameter_key + '_combined') in evm.results:
-            results_key = parameter_key + '_combined'
-        data = evm.results[results_key]
+        data = self.reported_results(parameter_key)
 
         # Ensure that we always get the expected shape
         # (even if the array was not initialized yet)
@@ -1142,15 +1166,10 @@ class EvaluationController(ImageController):
                     sliced = data[:, :, :, :, :, 1:]
                 # Weighted average of all multi-peak fits
                 if brillouin_peak_index == nr_peaks_stored + 1:
-                    intensity_key = 'brillouin_peak_intensity'
-                    fwhm_key = 'brillouin_peak_fwhm_f'
-                    if evm.evaluation_mode == 'sum':
-                        intensity_key += '_combined'
-                        fwhm_key += '_combined'
                     weight =\
-                        evm.results[
-                            intensity_key][:, :, :, :, :, 1:]\
-                        * evm.results[fwhm_key][
+                        self.reported_results(
+                            'brillouin_peak_intensity')[:, :, :, :, :, 1:]\
+                        * self.reported_results('brillouin_peak_fwhm_f')[
                           :, :, :, :, :, 1:]
                     # Nansum returns 0 if all entries are NaN, dividing by this
                     # hence gives an invalid value error
@@ -1185,6 +1204,46 @@ class EvaluationController(ImageController):
 
         return data, positions, dimensionality, labels
 
+    def summed_points(self):
+        """
+        Boolean (x, y, z) array: the points whose reported values come
+        from the fit of their summed spectra - every point in 'sum'
+        mode, in 'auto' mode the points with more frames than the
+        static frame count (adaptive frame extension), none in
+        'single' mode. None before anything was evaluated.
+        """
+        evm = self.session.evaluation_model()
+        if evm is None or evm.results['time'].size == 0:
+            return None
+        frames = np.sum(np.isfinite(evm.results['time'][..., 0, 0]), axis=3)
+        if evm.evaluation_mode == 'sum':
+            return frames > 0
+        static_frames = _static_frame_count(self.session)
+        if evm.evaluation_mode != 'auto' or static_frames is None:
+            return np.zeros(frames.shape, dtype=bool)
+        return frames > static_frames
+
+    def reported_results(self, key):
+        """
+        evm.results[key], with the values of the summed-spectrum fit
+        (key + '_combined') at the points that are reported from it
+        (see summed_points()). Keys without a '_combined' counterpart
+        are returned unchanged.
+        """
+        evm = self.session.evaluation_model()
+        data = evm.results[key]
+        combined_key = key + '_combined'
+        if combined_key not in evm.results or data.size == 0:
+            return data
+        summed = self.summed_points()
+        if summed is None or not summed.any():
+            return data
+        if summed.all():
+            return evm.results[combined_key]
+        data = data.copy()
+        data[summed] = evm.results[combined_key][summed]
+        return data
+
     # Parameter keys meaningful as a quality filter - see
     # EvaluationModel.get_default_parameters() for what each measures.
     # Every key here except 'brillouin_peak_fwhm_f' also has a default
@@ -1202,6 +1261,8 @@ class EvaluationController(ImageController):
         'brillouin_peak_nrmse',
         'rayleigh_peak_nrmse',
         'brillouin_peak_fwhm_f',
+        'brillouin_double_peak',
+        'brillouin_shift_f_stokes_anti_stokes',
     ]
 
     # Sentinel default for set_quality_threshold()'s keyword arguments,
@@ -1454,6 +1515,25 @@ class EvaluationController(ImageController):
                 or ind_z >= resolution[2]:
             raise ValueError('Invalid key')
         return ind_x, ind_y, ind_z
+
+
+def _static_frame_count(session):
+    """
+    The number of frames the acquisition took at every point of the
+    current repetition before any adaptive frame extension (its camera
+    frame count), or None if the file does not record it.
+    """
+    repetition = session.current_repetition()
+    if repetition is None:
+        return None
+    try:
+        settings = repetition.payload.get_acquisition_settings()
+    except Exception:
+        return None
+    count = (settings or {}).get('camera_frame_count_used')
+    if count is None or not np.isfinite(count) or count < 1:
+        return None
+    return int(count)
 
 
 def _get_fsr(cm):
@@ -1973,6 +2053,10 @@ class ExportController(object):
             },
             'overviewBrightfield': {
                 'export': True,
+                # Additionally write the unstitched tiles of a tiled
+                # overview (folder overview_<n>_<time>_tiles), e.g. for
+                # drift correction.
+                'exportTiles': False,
             },
         }
 

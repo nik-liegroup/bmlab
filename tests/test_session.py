@@ -135,6 +135,31 @@ def test_session_aborted_repetition_with_no_positions():
     assert session.get_payload_positions() is not None
 
 
+def test_payload_positions_are_copies_of_the_payload():
+    """
+    A caller that edits the positions it gets (the GUI plots centre x and
+    y) must not change the payload's own positions - they are what the
+    CSV export writes (absolute stage um).
+    """
+    session = Session.get_instance()
+    session.set_file(data_file_path('2D-xy.h5'))
+    session.set_current_repetition('0')
+    original = {axis: positions.copy() for axis, positions
+                in session.current_repetition().payload.positions.items()}
+
+    positions = session.get_payload_positions()
+    for axis in ('x', 'y', 'z'):
+        positions[axis] -= 1000.0
+
+    stored = session.current_repetition().payload.positions
+    for axis in ('x', 'y', 'z'):
+        np.testing.assert_array_equal(stored[axis], original[axis])
+    for axis in ('x', 'y', 'z'):  # and a second call is unaffected too
+        np.testing.assert_array_equal(
+            session.get_payload_positions()[axis],
+            np.transpose(original[axis], axes=(1, 2, 0)))
+
+
 def test_session_get_calib_keys():
     session = Session.get_instance()
     session.set_file(data_file_path('2D-xy.h5'))
@@ -167,8 +192,6 @@ def test_session_has_no_surface_scan_by_default():
 
     assert not session.has_surface_scan()
     assert session.get_surface_scan_data() is None
-    assert not session.has_overview_brightfield()
-    assert session.get_overview_brightfield_positions() is None
     assert session.get_overview_brightfield_keys() == []
     assert session.get_overview_brightfield_image('0') is None
 
@@ -188,16 +211,11 @@ def test_session_get_overview_brightfield():
     session.set_file(data_file_path('SurfaceScan.h5'))
     session.set_current_repetition('0')
 
-    assert session.has_overview_brightfield()
-
     keys = session.get_overview_brightfield_keys()
     assert keys == ['0', '1', '2', '3']
 
     image = session.get_overview_brightfield_image(keys[0])
     assert image.shape == (1, 20, 20)
-
-    positions = session.get_overview_brightfield_positions()
-    assert positions['tile_count'] == 2
 
 
 def test_session_current_fluorescence_repetition_by_brillouin_index(
@@ -232,7 +250,7 @@ def test_session_current_fluorescence_repetition_by_brillouin_index(
     rep = session.current_fluorescence_repetition()
     assert rep is not None
     assert rep.payload.image_keys_by_channel(
-        'Brightfield z overview') == ['0', '1', '2', '3']
+        'Brightfield overview') == ['0', '1', '2', '3']
 
     session.set_current_repetition('5')
     assert session.current_fluorescence_repetition() is None

@@ -34,10 +34,16 @@ class EvaluationModel(Serializer):
         # @since 0.14.0
         # How multiple camera "frame repeats" at the same measurement
         # point are combined into the reported fit values:
-        # 'single' (default) - every frame is fit separately and the
-        #   reported value is the nanmean across frames, exactly as
-        #   before this setting existed. Existing/new sessions default
-        #   here so nothing changes unless a user opts in.
+        # 'auto' (default for new models) - per point: the static frames
+        #   of the acquisition (its camera frame count) are fit
+        #   separately and averaged as in 'single'; a point that got
+        #   more frames than that (adaptive frame extension of
+        #   BrillouinAcquisition) is reported from the fit of its summed
+        #   spectra as in 'sum'. A file without a recorded frame count
+        #   behaves as 'single'.
+        # 'single' - every frame is fit separately and the reported
+        #   value is the nanmean across frames (sessions saved before
+        #   this setting existed load with this).
         # 'sum' - every frame is still fit separately (unchanged - this
         #   still feeds brillouin_shift_frame_spread/
         #   rayleigh_shift_frame_spread and the raw per-frame time/
@@ -47,7 +53,7 @@ class EvaluationModel(Serializer):
         #   reported value for every fit-derived quantity then comes
         #   from that single sum-fit instead of the per-frame nanmean
         #   (see EvaluationController.get_data()'s '_combined' redirect).
-        self.evaluation_mode = 'single'
+        self.evaluation_mode = 'auto'
 
         self.results = {}
         for key in self.parameters.keys():
@@ -178,6 +184,16 @@ class EvaluationModel(Serializer):
                 self.results[combined_key] = np.full(
                     self.results[key].shape, np.nan)
 
+        # Migration for the double-peak quality check.
+        # Results saved before the double-peak check existed were never
+        # checked for one: count every fitted point as "no double peak"
+        # rather than leaving NaN, which a threshold would treat as a
+        # failure for the whole file. Re-evaluating fills in real values.
+        if 'brillouin_double_peak' not in self.results:
+            fitted = np.isfinite(self.results['brillouin_peak_position_f'])
+            self.results['brillouin_double_peak'] = np.where(
+                fitted, 0.0, np.nan)
+
     def invalidate_results(self):
         for key in self.parameters:
             self.results[key][:] = np.nan
@@ -307,6 +323,20 @@ class EvaluationModel(Serializer):
                 'label': 'Brillouin peak center uncertainty (quality)',
                 'scaling': 1e-9,
             },
+            'brillouin_double_peak': {
+                # [-] 1 = the spectrum shows two clearly separate peaks
+                # in the Brillouin region (see bmlab.double_peak), 0 = it
+                # doesn't. Averaged over frames and regions like every
+                # other parameter, so any value above 0 means a double
+                # peak was found somewhere at this point. A single
+                # Lorentzian fitted to such a spectrum lands between or
+                # on one of the peaks, and neither is a meaningful
+                # Brillouin shift - fit SNR and NRMSE can still look fine.
+                'unit': '',
+                'symbol': r'$\mathrm{DP}_\mathrm{B}$',
+                'label': 'Brillouin double peak detected (quality)',
+                'scaling': 1,
+            },
             'rayleigh_peak_snr': {
                 # [a.u.] Same as brillouin_peak_snr, for the Rayleigh
                 # fit - the Brillouin shift is computed relative to the
@@ -405,6 +435,18 @@ class EvaluationModel(Serializer):
                 'enabled': True, 'min': None, 'max': 0.08},
             'rayleigh_peak_center_uncertainty': {
                 'enabled': True, 'min': None, 'max': 0.08},
+            # Any clearly detected double peak invalidates the point
+            # (the value is the fraction of frames/regions showing one).
+            'brillouin_double_peak': {
+                'enabled': True, 'min': None, 'max': 0.0},
+            # Shift window [GHz] (780 nm, backscattering): water is at
+            # about 5.07 GHz, so points below 5.10 are the medium (or
+            # mostly medium); fits that jumped onto another peak end up
+            # far above any tissue value (about 7.5 GHz) yet can still
+            # pass every fit-quality check. Setup specific - adjust for
+            # another wavelength/geometry.
+            'brillouin_shift_f_stokes_anti_stokes': {
+                'enabled': True, 'min': 5.10, 'max': 5.6},
         }
 
     def initialize_results_arrays(self, dims):
@@ -471,6 +513,9 @@ class EvaluationModel(Serializer):
         self.results['brillouin_peak_center_uncertainty'] = np.empty(
             shape_brillouin)
         self.results['brillouin_peak_center_uncertainty'][:] = np.nan
+
+        self.results['brillouin_double_peak'] = np.empty(shape_brillouin)
+        self.results['brillouin_double_peak'][:] = np.nan
 
         # Derived (not fit-direct) quality diagnostic - only
         # controllers.calculate_derived_values() actually computes

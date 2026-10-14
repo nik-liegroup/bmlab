@@ -5,7 +5,7 @@ from bmlab.models.evaluation_model import EvaluationModel
 
 def test_evaluation_mode_default():
     evm = EvaluationModel()
-    assert evm.evaluation_mode == 'single'
+    assert evm.evaluation_mode == 'auto'
 
 
 def test_initialize_results_arrays_combined_keys():

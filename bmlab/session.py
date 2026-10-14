@@ -10,7 +10,7 @@ import math
 
 from bmlab import __version__ as version
 from bmlab.file import BrillouinFile, is_source_file, is_session_file, \
-    FLUORESCENCE_GROUP, OVERVIEW_BRIGHTFIELD_CHANNEL
+    FLUORESCENCE_GROUP, OVERVIEW_CHANNELS
 from bmlab.models.extraction_model import ExtractionModel
 from bmlab.models.orientation import Orientation
 from bmlab.models.crop import Crop
@@ -235,7 +235,39 @@ class Session(Serializer):
             Session()
         return Session.__instance
 
-    def set_file(self, file_name):
+    @staticmethod
+    def preload(file_name):
+        """
+        Does the slow, session-independent part of set_file() ahead of
+        time, so that it can run in a background thread while another
+        file is being worked on: opens the file, builds its repetitions
+        and reads its saved session. Only metadata, positions and the
+        saved models are read - never the image data.
+
+        Returns
+        -------
+        out : dict
+            {'file': BrillouinFile, 'session': saved session or None},
+            to be passed to set_file() as `preloaded`. Unused ones
+            should be closed with close_preloaded().
+        """
+        file_name = get_valid_source(file_name)
+        if file_name is None:
+            raise Exception('No source data file found')
+        file = BrillouinFile(file_name)
+        try:
+            for repetition_key in file.repetition_keys():
+                file.get_repetition(repetition_key)
+            return {'file': file, 'session': Session.read_session(file_name)}
+        except BaseException:
+            file.close()
+            raise
+
+    @staticmethod
+    def close_preloaded(preloaded):
+        preloaded['file'].close()
+
+    def set_file(self, file_name, preloaded=None):
         """
         Set the file to be processed.
 
@@ -245,6 +277,8 @@ class Session(Serializer):
         ----------
         file_name : Path
             The file name.
+        preloaded : dict, optional
+            The result of preload() for this file.
 
         """
         # Get the source file in case it's a session file
@@ -252,9 +286,13 @@ class Session(Serializer):
         # There is no valid source file
         if file_name is None:
             raise Exception('No source data file found')
+        if preloaded is not None \
+                and Path(preloaded['file'].path) != Path(file_name).resolve():
+            preloaded = None
 
         try:
-            file = BrillouinFile(file_name)
+            file = preloaded['file'] if preloaded is not None \
+                else BrillouinFile(file_name)
         except Exception as e:
             raise e
         else:
@@ -287,7 +325,10 @@ class Session(Serializer):
             session.setup = AVAILABLE_SETUPS[0]
 
         try:
-            self.load(file_name)
+            if preloaded is not None:
+                self.load(file_name, preloaded['session'])
+            else:
+                self.load(file_name)
             self.set_arc_width()
         except Exception as e:
             raise e
@@ -426,10 +467,12 @@ class Session(Serializer):
         if positions is None:
             return None
         # We need to correctly transpose the array to have the
-        # axes in order x-y-z
-        for axis in positions:
-            positions[axis] = transpose(positions[axis], axes=(1, 2, 0))
-        return positions
+        # axes in order x-y-z. A transposed array is only a view of the
+        # payload's own array, so it is copied: the payload is shared
+        # between calls and its positions (absolute stage um, as
+        # exported) must not change when a caller edits what it gets.
+        return {axis: transpose(positions[axis], axes=(1, 2, 0)).copy()
+                for axis in positions}
 
     def current_fluorescence_repetition(self):
         """
@@ -486,22 +529,15 @@ class Session(Serializer):
             return None
         return rep.payload.get_surface_scan_data()
 
-    def has_overview_brightfield(self):
-        rep = self.current_repetition()
-        return rep is not None and rep.payload.has_overview_brightfield()
-
-    def get_overview_brightfield_positions(self):
-        rep = self.current_repetition()
-        if rep is None:
-            return None
-        return rep.payload.get_overview_brightfield_positions()
-
     def get_overview_brightfield_keys(self, sort_by_time=False):
         rep = self.current_fluorescence_repetition()
         if rep is None:
             return []
-        return rep.payload.image_keys_by_channel(
-            OVERVIEW_BRIGHTFIELD_CHANNEL, sort_by_time=sort_by_time)
+        # both the z overviews and those of the overview engine
+        keys = [key for key in rep.payload.image_keys(
+            sort_by_time=sort_by_time)
+            if rep.payload.get_channel(key) in OVERVIEW_CHANNELS]
+        return keys
 
     def get_overview_brightfield_image(self, image_key, frame_num=None):
         rep = self.current_fluorescence_repetition()
@@ -594,12 +630,16 @@ class Session(Serializer):
             # Store the current bmlab version
             f.attrs['version'] = 'bmlab_' + version
 
-    def load(self, h5_file_name):
-
+    @staticmethod
+    def read_session(h5_file_name):
+        """
+        Reads the saved session belonging to a source file without
+        touching the current session. Returns None if there is none.
+        """
         session_file_name = get_session_file_path(h5_file_name)
 
         if not os.path.exists(session_file_name):
-            return
+            return None
 
         if not is_session_file(session_file_name):
             raise BmlabInvalidFileError(
@@ -611,10 +651,24 @@ class Session(Serializer):
             )
 
         with h5py.File(session_file_name, 'r') as f:
-            new_session = Serializer.deserialize(f['session'])
-            session = Session.get_instance()
-            for var_name, var_value in new_session.__dict__.items():
-                session.__dict__[var_name] = var_value
+            return Serializer.deserialize(f['session'])
+
+    _READ = object()
+
+    def load(self, h5_file_name, new_session=_READ):
+        """
+        Loads the saved session of a source file into this session.
+        `new_session` is the result of read_session() if that has
+        already been done (None: no saved session).
+        """
+        if new_session is Session._READ:
+            new_session = self.read_session(h5_file_name)
+        if new_session is None:
+            return
+
+        session = Session.get_instance()
+        for var_name, var_value in new_session.__dict__.items():
+            session.__dict__[var_name] = var_value
 
         self.run_migrations()
 

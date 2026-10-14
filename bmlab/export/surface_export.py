@@ -8,6 +8,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers '3d')
 
 from bmlab import Session
 from bmlab.file import Payload
+from bmlab.export.naming import folder_name
 from bmlab.export.selection import repetition_selected
 
 
@@ -51,7 +52,11 @@ class SurfaceExport(object):
 
             filename_base = f"surface_BMrep{repetition_key}"
 
-            plot_path = self._plot_path()
+            # Everything about the surface of one repetition - the plots
+            # and the metrics - goes into one folder Surface_BMrep<N>.
+            plot_path = self._plot_path() / folder_name(
+                'Surface', repetition_key)
+            os.makedirs(plot_path, exist_ok=True)
 
             found_mask = data.get('surface_found_mask')
             positions_z = repetition.payload.positions['z'] \
@@ -182,8 +187,7 @@ class SurfaceExport(object):
 
             metrics = self._compute_metrics(data, sampled_projection)
 
-            export_path = self._export_data_path()
-            json_filename = export_path / f"{filename_base}_metrics.json"
+            json_filename = plot_path / f"{filename_base}_metrics.json"
             with open(json_filename, 'w') as f:
                 json.dump(metrics, f, indent=2, default=_json_default)
 

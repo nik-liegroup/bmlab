@@ -60,3 +60,32 @@ def test_calibrate():
     calib_key = '0'
     cc = CalibrationController()
     cc.calibrate(calib_key)
+
+
+def test_calibrate_counts_frames_without_a_fit(monkeypatch):
+    # Whoever shows the progress waits for count to reach max_count, so
+    # a frame that cannot be fitted must be counted as done as well
+    import multiprocessing as mp
+    import bmlab.controllers as controllers
+
+    session = Session.get_instance()
+    session.set_file(pathlib.Path(__file__).parent / 'data' / 'Water.h5')
+    session.set_current_repetition('0')
+    session.set_setup(AVAILABLE_SETUPS[0])
+    session.orientation = Orientation(rotation=1, reflection={
+        'vertically': False, 'horizontally': False
+    })
+    ec = ExtractionController()
+    cc = CalibrationController()
+    for calib_key in session.get_calib_keys():
+        ec.find_points(calib_key)
+    calib_key = session.get_calib_keys()[0]
+    cc.find_peaks(calib_key)
+    monkeypatch.setattr(controllers, 'fit_vipa', lambda peaks, setup: None)
+
+    count = mp.Value('I', 0, lock=True)
+    max_count = mp.Value('i', 0, lock=True)
+    cc.calibrate(calib_key, count=count, max_count=max_count)
+
+    assert max_count.value > 0
+    assert count.value == max_count.value
