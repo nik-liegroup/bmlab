@@ -329,12 +329,13 @@ class CalibrationController(ImageController):
             peaks = cm.get_sorted_peaks(calib_key, frame_num)
 
             params = fit_vipa(peaks, setup)
-            if params is None:
-                continue
-            vipa_params.append(params)
-            xdata = np.arange(len(spectrum))
+            if params is not None:
+                vipa_params.append(params)
+                xdata = np.arange(len(spectrum))
 
-            frequencies.append(VIPA(xdata, params) - setup.f0)
+                frequencies.append(VIPA(xdata, params) - setup.f0)
+            # A frame without a fit is done too: whoever shows the
+            # progress waits for count to reach max_count
             if count is not None:
                 count.value += 1
 
@@ -573,6 +574,12 @@ class EvaluationController(ImageController):
         # so changing nr_brillouin_peaks during evaluation
         # does not create issues
         nr_brillouin_peaks = evm.nr_brillouin_peaks
+        # Points may have different numbers of frames (adaptive frame
+        # extension), so the frame axis must fit the largest one
+        nr_images = max(
+            [len(spectra)] + [
+                self.session.current_repetition().payload.get_image_count(
+                    key) for key in image_keys])
         evm.initialize_results_arrays({
             # measurement points in x direction
             'dim_x': resolution[0],
@@ -581,7 +588,7 @@ class EvaluationController(ImageController):
             # measurement points in z direction
             'dim_z': resolution[2],
             # number of images per measurement point
-            'nr_images': len(spectra),
+            'nr_images': nr_images,
             # number of Brillouin regions
             'nr_brillouin_regions': len(brillouin_regions),
             # number of peaks to fit per region
@@ -593,7 +600,7 @@ class EvaluationController(ImageController):
         # Initialize the Rayleigh shift
         # used for compensating drifts
         rayleigh_peak_initial =\
-            np.nan * np.ones((len(spectra), len(rayleigh_regions), 1))
+            np.nan * np.ones((nr_images, len(rayleigh_regions), 1))
         # Loop over all measurement positions
         for idx, image_key in enumerate(image_keys):
 
@@ -613,10 +620,11 @@ class EvaluationController(ImageController):
                 self.extract_spectra(image_key)
             if spectra is None:
                 continue
-            evm.results['time'][ind_x, ind_y, ind_z, :, 0, 0] =\
+            nr_frames = len(spectra)
+            evm.results['time'][ind_x, ind_y, ind_z, :nr_frames, 0, 0] =\
                 times
-            evm.results['intensity'][ind_x, ind_y, ind_z, :, 0, 0] =\
-                intensities
+            evm.results['intensity'][
+                ind_x, ind_y, ind_z, :nr_frames, 0, 0] = intensities
 
             frequencies = cm.get_frequencies_by_time(times)
             # If we don't have frequency axis, we cannot evaluate on it
@@ -732,8 +740,8 @@ class EvaluationController(ImageController):
             # the multi-peak fit bounds given in GHz into the position
             # in pixels.
             if nr_brillouin_peaks > 1:
-                ind =\
-                    (ind_x, ind_y, ind_z, slice(None), slice(None), 0)
+                ind = (ind_x, ind_y, ind_z,
+                       slice(0, nr_frames), slice(None), 0)
                 rayleigh_peaks = np.transpose(
                     evm.results['rayleigh_peak_position_f'][ind]
                 )
@@ -1981,6 +1989,10 @@ class ExportController(object):
             },
             'overviewBrightfield': {
                 'export': True,
+                # Additionally write the unstitched tiles of a tiled
+                # overview (folder overview_<n>_<time>_tiles), e.g. for
+                # drift correction.
+                'exportTiles': False,
             },
         }
 

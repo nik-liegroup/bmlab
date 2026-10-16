@@ -400,3 +400,17 @@ def test_fitset():
     fit_set.clear('10')
 
     assert fit_set.get_fit('10', 3, 4) is None
+
+
+def test_get_sorted_peaks_skips_failed_fits():
+    # a failed fit stores one NaN instead of the peak positions
+    cm = CalibrationModel()
+    cm.add_rayleigh_fit('1', 0, 0, 10.0, 2.0, 100.0, 1.0)
+    cm.add_rayleigh_fit('1', 1, 0, np.nan, np.nan, np.nan, np.nan)
+    cm.add_brillouin_fit('1', 0, 0, (30.0, 20.0), (2.0, 2.0), (50.0, 50.0), 1)
+    cm.add_brillouin_fit('1', 1, 0, np.nan, np.nan, np.nan, np.nan)
+
+    peaks = cm.get_sorted_peaks('1', 0)
+
+    assert list(peaks) == [10.0, 20.0, 30.0]
+    assert len(cm.get_sorted_peaks('1', 1)) == 0  # other frame: none

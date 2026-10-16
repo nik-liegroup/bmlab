@@ -80,14 +80,16 @@ def test_export_fluorescence_respects_brillouin_repetition_filter(tmp_dir):
     session.clear()
 
     plots_dir = tmp_dir.parent / 'Plots'
+    # Brillouin repetition 0 is excluded: nothing is written for the
+    # images that belong to it.
+    assert not (plots_dir / 'FL_BMrep0').exists()
+    # Repetition 1 has no tie to a Brillouin repetition and none was
+    # acquired after it, so it is filed under FL_afterBM.
+    standalone = plots_dir / 'FL_afterBM'
     for channel in ('Blue', 'Green', 'Red', 'Brightfield'):
-        assert not list(plots_dir.glob(f'{channel}_*_FLrep0.png'))
-        assert_glob_exists(plots_dir, f'{channel}_*_FLrep1.png')
-
-    combined_dir = tmp_dir.parent / 'Plots' / 'Bare'
-    assert not list(combined_dir.glob('fluorescenceCombined_rgb_*_FLrep0.png'))
-    assert_glob_exists(
-        combined_dir, 'fluorescenceCombined_rgb_*_FLrep1.png')
+        assert len(list(standalone.glob(f'{channel}_*.tif'))) == 1
+    assert_glob_exists(standalone, 'fluorescenceCombined_rgb_*.tif')
+    assert not list(plots_dir.rglob('*.png'))
 
 
 def test_export_fluorescence(tmp_dir):
@@ -112,9 +114,16 @@ def test_export_fluorescence(tmp_dir):
     # brillouin_repetition_index, so each filename gets a capture-
     # timestamp tag (see bmlab.export.naming.repetition_or_timestamp_tag)
     # instead of a '_BMrepN' one.
+    standalone = plots_dir / 'FL_afterBM'
     for channel in ('Blue', 'Brightfield', 'Green', 'Red'):
-        for rep in ('0', '1'):
-            assert_glob_exists(plots_dir, f'{channel}_*_FLrep{rep}.png')
+        # one image per channel in each of the two repetitions, named
+        # '<Channel>_<capture time>.tif' (TIFF only - no PNG)
+        assert len(list(standalone.glob(f'{channel}_*.tif'))) == 2
+    assert not list(plots_dir.rglob('*.png'))
+    # the images must not come out black (pixel values are kept)
+    import tifffile
+    for image in standalone.glob('*.tif'):
+        assert tifffile.imread(image).max() > 0
 
 
 def test_export_fluorescence_transform_matrix(tmp_dir):
@@ -151,7 +160,7 @@ def test_export_fluorescence_transform_matrix(tmp_dir):
 
     session.clear()
 
-    plots_dir = tmp_dir.parent / 'Plots'
+    plots_dir = tmp_dir.parent / 'Plots' / 'FL_afterBM'
     transform_dir = plots_dir / 'TransformMatrices'
     assert transform_dir.is_dir()
 
@@ -165,29 +174,26 @@ def test_export_fluorescence_transform_matrix(tmp_dir):
         return matrix
 
     for channel in ('Blue', 'Green', 'Red', 'Brightfield'):
-        png = assert_glob_exists(plots_dir, f'{channel}_*_FLrep0.png')
-        assert_valid_matrix(
-            transform_dir / (png.stem + '_transform.csv'))
+        for image in plots_dir.glob(f'{channel}_*.tif'):
+            assert_valid_matrix(
+                transform_dir / (image.stem + '_transform.csv'))
 
     # Both repetitions were given a different x position (see above) -
     # their transform matrices must actually differ, not just both
     # happen to exist.
-    png_rep0 = assert_glob_exists(plots_dir, 'Blue_*_FLrep0.png')
-    png_rep1 = assert_glob_exists(plots_dir, 'Blue_*_FLrep1.png')
-    matrix_rep0 = assert_valid_matrix(
-        transform_dir / (png_rep0.stem + '_transform.csv'))
-    matrix_rep1 = assert_valid_matrix(
-        transform_dir / (png_rep1.stem + '_transform.csv'))
-    assert not np.allclose(matrix_rep0, matrix_rep1)
+    blue = sorted(plots_dir.glob('Blue_*.tif'))
+    assert len(blue) == 2
+    matrix_first = assert_valid_matrix(
+        transform_dir / (blue[0].stem + '_transform.csv'))
+    matrix_second = assert_valid_matrix(
+        transform_dir / (blue[1].stem + '_transform.csv'))
+    assert not np.allclose(matrix_first, matrix_second)
 
-    combined_transform_dir = \
-        tmp_dir.parent / 'Plots' / 'Bare' / 'TransformMatrices'
-    assert combined_transform_dir.is_dir()
-    combined_png = assert_glob_exists(
-        tmp_dir.parent / 'Plots' / 'Bare',
-        'fluorescenceCombined_rgb_*_FLrep0.png')
-    assert_valid_matrix(
-        combined_transform_dir / (combined_png.stem + '_transform.csv'))
+    # The colour composites sit in the same folder and have their own
+    # matrices.
+    combined = assert_glob_exists(
+        plots_dir, 'fluorescenceCombined_rgb_*.tif')
+    assert_valid_matrix(transform_dir / (combined.stem + '_transform.csv'))
 
 
 def test_export_color_images(tmp_dir):
@@ -205,8 +211,8 @@ def test_export_color_images(tmp_dir):
 
     session.clear()
 
-    plots_dir = tmp_dir.parent / 'Plots'
-    assert_glob_exists(plots_dir, 'Brightfield_*_FLrep0.png')
+    plots_dir = tmp_dir.parent / 'Plots' / 'FL_afterBM'
+    assert_glob_exists(plots_dir, 'Brightfield_*.tif')
 
 
 def test_export_color_images_plane(tmp_dir):
@@ -225,8 +231,8 @@ def test_export_color_images_plane(tmp_dir):
 
     session.clear()
 
-    plots_dir = tmp_dir.parent / 'Plots'
-    assert_glob_exists(plots_dir, 'Brightfield_*_FLrep0.png')
+    plots_dir = tmp_dir.parent / 'Plots' / 'FL_afterBM'
+    assert_glob_exists(plots_dir, 'Brightfield_*.tif')
 
 
 def test_export_fluorescence_combined(tmp_dir):
@@ -244,19 +250,18 @@ def test_export_fluorescence_combined(tmp_dir):
 
     session.clear()
 
-    plots_dir = tmp_dir.parent / 'Plots' / 'Bare'
     # Fluorescence.h5 has a scale calibration and no Brillouin
-    # repetitions, so only the stage-aligned combination is exported.
-    # None of its images carry a brillouin_repetition_index, so each
-    # filename gets a capture-timestamp tag instead of a '_BMrepN' one.
+    # repetitions, so only the stage-aligned combinations are exported,
+    # into FL_afterBM next to the single channel images, named by
+    # capture time.
+    plots_dir = tmp_dir.parent / 'Plots' / 'FL_afterBM'
     combinations = [
         '__b', '_g_', '_gb', 'r__', 'r_b', 'rg_', 'rgb',
     ]
     for combination in combinations:
-        for rep in ('0', '1'):
-            assert_glob_exists(
-                plots_dir,
-                f'fluorescenceCombined_{combination}_*_FLrep{rep}.png')
+        # one per Fluorescence repetition
+        assert len(list(plots_dir.glob(
+            f'fluorescenceCombined_{combination}_*.tif'))) == 2
 
 
 def test_export_brillouin_2D(tmp_dir):
@@ -645,34 +650,32 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
     session.clear()
 
     plots_dir = tmp_dir.parent / 'Plots'
-    images = [
-        'surface_BMrep0_z_surface.png',
-        'surface_BMrep0_3d.png',
-        'surface_BMrep0_roi_plan_mask.png',
-        # SurfaceScan.h5's overview images belong to Brillouin
-        # repetition 0 (see the injected brillouin_repetition_index
-        # above), with 2 z-planes x 2 tiles each (point_count=2,
-        # point_stack_counts=[1, 1]) - no FLrep in the name (only one
-        # overview stack is ever written per Brillouin repetition), one
-        # file per z-plane since each plane's own tiles don't belong in
-        # one combined stack with another plane's, and each is a tiled
-        # mosaic since it has more than one distinct tile position.
-        'overviewZStack_0_BMrep0_tiled.tif',
-        'overviewZStack_1_BMrep0_tiled.tif',
-    ]
-    for image in images:
-        assert os.path.exists(plots_dir / image)
+    surface_dir = plots_dir / 'Surface_BMrep0'
+    for image in ('surface_BMrep0_z_surface.png',
+                  'surface_BMrep0_3d.png',
+                  'surface_BMrep0_roi_plan_mask.png'):
+        assert os.path.exists(surface_dir / image)
 
-    # Each tiled mosaic gets a matching matrix mapping an absolute
-    # stage position (x, y, um) onto its own pixel coordinates.
-    transforms = [
-        'overviewZStack_0_BMrep0_tiled_transform.csv',
-        'overviewZStack_1_BMrep0_tiled_transform.csv',
-    ]
-    matrices_dir = plots_dir / 'TransformMatrices'
-    for transform in transforms:
-        assert os.path.exists(matrices_dir / transform)
-        with open(matrices_dir / transform) as f:
+    # SurfaceScan.h5's overview images belong to Brillouin repetition 0
+    # (see the injected brillouin_repetition_index above), with 2
+    # z-planes x 2 tiles each (point_count=2, point_stack_counts=[1,
+    # 1]). They go into the folder Overview_BMrep0, one file per
+    # z-plane (each plane's own tiles don't belong in one combined stack
+    # with another plane's), numbered in the order they were taken and
+    # named by capture time; each is a merged mosaic since it has more
+    # than one distinct tile position.
+    overview_dir = plots_dir / 'Overview_BMrep0'
+    overviews = sorted(overview_dir.glob('overview_*.tif'))
+    assert [o.name.split('_')[1] for o in overviews] == ['1', '2']
+    assert not list(plots_dir.glob('overviewZStack*'))
+
+    # Each mosaic gets a matching matrix mapping an absolute stage
+    # position (x, y, um) onto its own pixel coordinates.
+    matrices_dir = overview_dir / 'TransformMatrices'
+    for overview in overviews:
+        transform = matrices_dir / (overview.stem + '_transform.csv')
+        assert os.path.exists(transform)
+        with open(transform) as f:
             rows = [line.strip().split(',') for line in f if line.strip()]
         assert len(rows) == 3
         assert all(len(row) == 3 for row in rows)
@@ -681,16 +684,16 @@ def test_export_surface_and_overview_brightfield(tmp_dir):
     # (positions-surface-prescan-x/y-um etc.) - no plot should be
     # produced for data that was never saved.
     assert not os.path.exists(
-        plots_dir / 'surface_BMrep0_prescan_points.png')
+        surface_dir / 'surface_BMrep0_prescan_points.png')
 
     # SurfaceScan.h5 has no drawn ROI polygon saved - only its
     # grid-rasterized 'roi_scan_plan_mask' - so no polygon plot is
     # produced for it.
     assert not os.path.exists(
-        plots_dir / 'surface_BMrep0_roi_polygon.png')
+        surface_dir / 'surface_BMrep0_roi_polygon.png')
 
-    export_dir = tmp_dir.parent / 'Export'
-    metrics_file = export_dir / 'surface_BMrep0_metrics.json'
+    # The metrics sit with the surface plots, not in the data folder.
+    metrics_file = surface_dir / 'surface_BMrep0_metrics.json'
     assert os.path.exists(metrics_file)
 
     with open(metrics_file) as f:
@@ -785,3 +788,32 @@ def test_export_brillouin_3D(tmp_dir):
     # per-slice Plots/Bare and Plots/WithAxis image files.
     assert os.path.exists(
         tmp_dir.parent / 'Export' / '3D_BMrep0_data.csv')
+
+
+def test_untagged_overview_images_belong_to_the_running_repetition(tmp_dir):
+    """
+    Overview images are only taken during a Brillouin run. Files from
+    older acquisition software carry no brillouin_repetition_index for
+    them - they still belong to the repetition that was running, not to
+    "after the last one".
+    """
+    shutil.copy(
+        data_file_path('SurfaceScan.h5'), Path.cwd() / 'SurfaceScan.h5')
+
+    session = Session.get_instance()
+    session.set_file(Path('SurfaceScan.h5'))
+    session.set_current_repetition('0')
+
+    ec = ExportController()
+    config = ec.get_configuration()
+    config['fluorescence']['export'] = False
+    config['fluorescenceCombined']['export'] = False
+    config['brillouin']['export'] = False
+    config['surface']['export'] = False
+    ec.export(config)
+
+    session.clear()
+
+    plots_dir = tmp_dir.parent / 'Plots'
+    assert list((plots_dir / 'Overview_BMrep0').glob('overview_*.tif'))
+    assert not (plots_dir / 'Overview_afterBM').exists()

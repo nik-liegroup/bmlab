@@ -44,6 +44,7 @@ setup(
                       "pytest",
                       "pytest_mock",
                       "scikit-image>=0.19.0",
+                      "tifffile",
                       "scipy",
                       "shapely>=1.8.2"
                       ],

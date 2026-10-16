@@ -1302,3 +1302,37 @@ def test_post_deserialize_migrates_evaluation_mode_and_combined_keys():
         assert evm.results[key].shape == \
             evm.results[key.replace('_combined', '')].shape
         assert np.all(np.isnan(evm.results[key]))
+
+
+def test_evaluate_points_with_different_frame_counts(mocker):
+    """
+    A point with fewer frames than the others (adaptive frame
+    extension) used to size the result arrays - later points with more
+    frames then failed with "could not broadcast input array".
+    """
+    original = EvaluationController.extract_spectra
+    first_key = []
+
+    def ragged(self, image_key, frame_num=None):
+        spectra, times, intensities = original(self, image_key, frame_num)
+        if spectra is None:
+            return spectra, times, intensities
+        if not first_key:
+            first_key.append(image_key)
+        if image_key == first_key[0] and len(spectra) > 1:
+            return spectra[:1], times[:1], intensities[:1]
+        return spectra, times, intensities
+
+    mocker.patch.object(EvaluationController, 'extract_spectra', ragged)
+    evc, evm = _setup_and_evaluate('single')
+
+    frames = evc.session.get_payload_image(
+        evc.session.get_image_keys()[0]).shape[0]
+    assert frames > 1
+    assert evm.results['time'].shape[3] == frames
+    # The short first point has only its first frame filled
+    ind_x, ind_y, ind_z = evc.get_indices_from_key(
+        evc.session.current_repetition().payload.resolution,
+        first_key[0])
+    times = evm.results['time'][ind_x, ind_y, ind_z, :, 0, 0]
+    assert np.isfinite(times[0]) and np.isnan(times[1:]).all()
