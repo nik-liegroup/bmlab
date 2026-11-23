@@ -1,25 +1,34 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
+message: "If you use this software, please cite it as below and also cite the upstream bmlab listed under references."
 type: software
-title: "bmlab"
+title: "bmlab (fork)"
 abstract: >-
-  Library for reading, evaluating and exporting Brillouin microscopy data; this version adds support for the
-  overview engine of BrillouinAcquisition, the drift correction applied while measuring and the export of the
-  overview images.
+  Python library for the post-measurement analysis of Brillouin microscopy data. Modified fork of bmlab by the bmlab developers, released under the GNU General Public License v3.0. The
+  modifications by Niklas Gampl are documented in the CHANGELOG and the commit history.
 authors:
   - family-names: Gampl
     given-names: Niklas
-  - name: "bmlab developers"
 version: 0.14.0
 license: GPL-3.0-only
 repository-code: "https://github.com/nik-liegroup/bmlab"
 keywords:
   - Brillouin microscopy
   - data evaluation
+  - bmlab
+  - BrillouinAcquisition
 references:
   - type: software
     title: "bmlab"
     authors:
-      - name: "bmlab developers"
+      - family-names: Beck
+        given-names: Timon
+      - family-names: Behnisch
+        given-names: Matthias
+      - family-names: Bär
+        given-names: Matthias
+      - family-names: Müller
+        given-names: Paul
+      - family-names: Schlüßler
+        given-names: Raimund
     repository-code: "https://github.com/BrillouinMicroscopy/bmlab"
     license: GPL-3.0-only

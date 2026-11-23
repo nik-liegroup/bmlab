@@ -1,0 +1,26 @@
+{
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "gpl-3.0-only",
+  "title": "bmlab (fork)",
+  "description": "<p>Python library for the post-measurement analysis of Brillouin microscopy data. This is a modified fork of <a href=\"https://github.com/BrillouinMicroscopy/bmlab\">bmlab</a> by the bmlab developers, released under the GNU General Public License v3.0. The modifications by Niklas Gampl are documented in the CHANGELOG and the commit history.</p><p>The upstream code, its history and its authors are credited in the upstream repository; see the related identifier and the contributors listed here.</p>",
+  "creators": [
+    {"name": "Gampl, Niklas"}
+  ],
+  "contributors": [
+    {"name": "Bär, Matthias", "type": "Other"},
+    {"name": "Behnisch, Matthias", "type": "Other"},
+    {"name": "Müller, Paul", "type": "Other"},
+    {"name": "Schlüßler, Raimund", "type": "Other"},
+    {"name": "Beck, Timon", "type": "Other"}
+  ],
+  "keywords": ["Brillouin microscopy", "data evaluation", "bmlab", "BrillouinAcquisition"],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/BrillouinMicroscopy/bmlab",
+      "relation": "isDerivedFrom",
+      "resource_type": "software"
+    }
+  ],
+  "notes": "Derived work. The contributors listed are the authors of the upstream bmlab on which this fork is based; they are not authors of the modifications made in this fork."
+}
